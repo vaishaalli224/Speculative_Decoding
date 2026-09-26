@@ -1,5 +1,5 @@
 # Speculative Decoding for Tool-Calling Workloads — Project Plan
-
+**Repository should be completely reproducible**
 **One-line goal:** Make speculative decoding faster on tool-calling workloads by distilling a small draft model on-policy toward a frozen target — and characterize *where* the speedup comes from: structured tool-call JSON vs. free-form prose. The region-split acceptance analysis is this project's differentiator.
 
 **Hard constraint:** 1× H100 (80 GB) for one day. Everything that can be done without the H100 (data prep, code, tests, dry runs) must be finished locally before the GPU window opens.
