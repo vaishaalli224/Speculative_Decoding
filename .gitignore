@@ -1,0 +1,19 @@
+# Data (plan.md §7: data/ is gitignored — raw/ + processed/ stay local)
+data/raw/
+data/processed/
+data/cache/
+
+# Env
+.venv/
+.env
+
+# HF datasets cache spillover
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS
+.DS_Store

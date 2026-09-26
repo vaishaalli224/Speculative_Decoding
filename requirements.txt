@@ -1,0 +1,17 @@
+# Speculative_Decoding — pinned environment
+# Data prep only for now (Section 6.2/6.3 of plan.md). Serving (vLLM), training
+# (transformers/TRL) and plotting libs will be added when those stages start;
+# the H100 host must `pip install -r requirements.txt` from this file and get
+# the identical data-prep environment.
+
+datasets==5.0.1
+huggingface_hub==1.33.0
+python-dotenv==1.2.3
+
+# --- transitive deps, pinned for reproducibility ---
+pyarrow==25.0.1
+pandas==3.0.6
+numpy==2.5.3
+fsspec==2026.6.0
+filelock==4.0.4
+requests==2.34.2
