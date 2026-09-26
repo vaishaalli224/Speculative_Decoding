@@ -7,8 +7,8 @@
 ## 0. Executive summary
 
 1. Serve frozen **Qwen2.5-Coder-14B-Instruct** as target; benchmark plain autoregressive (AR) decoding.
-2. Run **untuned** speculative decoding with two draft candidates (Qwen2.5-0.5B-Instruct, 1.5B-Instruct) and a **no-model n-gram / prompt-lookup baseline**.
-3. Pick the better draft candidate by a pre-registered rule, then **distill it on-policy** on ToolBench prompts with tools rendered in the target's exact chat format.
+2. Run **untuned** speculative decoding with two draft candidates (Qwen2.5-Coder-0.5B-Instruct, Qwen2.5-Coder-1.5B-Instruct) and a **no-model n-gram / prompt-lookup baseline**.
+3. Pick the better draft candidate by a pre-registered rule, then distill it in two stages on ToolBench prompts with tools rendered in the target's exact chat format: a short **supervised KD warm-start** on target generations, then **on-policy distillation (DistillSpec/GKD-style)** where the draft samples and the target scores.
 4. Re-benchmark: sweep draft length k and temperature, measure at batch size 1 and one larger batch, split acceptance by output region, and evaluate format transfer on xLAM.
 5. Verify speculative outputs are token-identical to non-speculative greedy decoding.
 
@@ -19,15 +19,15 @@
 ### 1.1 Models
 
 - **Target (frozen):** Qwen2.5-Coder-14B-Instruct, bf16 → ~28 GB weights. Never fine-tuned; the whole point is a frozen target.
-- **Draft candidates:** Qwen2.5-0.5B-Instruct and Qwen2.5-1.5B-Instruct. Pick by untuned baseline results (rule in §8). Use *Instruct* SKUs, not base — the draft must imitate an instruct model, and an instruct draft starts much closer to the target distribution.
-- **Optional 30-min add-on (P2):** also try Qwen2.5-Coder-0.5B/1.5B-Instruct as drafts. Same tokenizer family; may match Coder's JSON/code token distribution better than the general Qwen2.5 drafts.
-- **Method:** on-policy distillation (DistillSpec-style). Not EAGLE-3 / DFlash etc. — no draft-head surgery, no extra target forward passes beyond data generation; fits the GPU and time budget. EAGLE needs training a static head against the frozen target and is far more engineering; DFlash is newer with less tooling.
+- **Draft candidates:** Qwen2.5-Coder-0.5B-Instruct and Qwen2.5-Coder-1.5B-Instruct. Pick by untuned baseline results (rule in §8). Use *Instruct* SKUs, not base — the draft must imitate an instruct model, and an instruct draft starts much closer to the target distribution. Coder drafts match the Coder target's JSON/code token distribution.
+- **Method:** two-stage distillation — supervised KD warm-start, then on-policy distillation (DistillSpec-style). Not EAGLE-3 / DFlash etc. — no draft-head surgery; fits the GPU and time budget. The target is used for Stage 1 data generation and for scoring draft samples during Stage 2 (forward passes only, no gradients). EAGLE needs training a head from scratch against the frozen target and is far more engineering; DFlash is newer with less tooling.
 
 ### 1.2 Verified tokenizer facts (checked against HF configs — these remove a whole class of failure modes)
 
 - The **entire Qwen2.5 family shares one tokenizer**: base / Instruct / Coder, 0.5B → 14B. Same special tokens (`<|im_start|>`, `<|im_end|>`, object/box/quad/vision tokens, etc.) in every member checked, including both draft candidates and the Coder target.
 - Consequence: **no cross-vocabulary handling anywhere** — no `use_heterogeneous_vocab`, no token remapping between draft and target. Any Qwen2.5 model can draft for the Coder target directly.
 - Target config: `vocab_size` 152,064 (embedding padded past tokenizer vocab 151,665), `max_position_embeddings` 32,768, bf16.
+- **Embedding padding differs by size:** the small drafts are expected to pad to 151,936 vs. the target's 152,064 (verify in configs during local prep). Irrelevant for token-level verification in vLLM, but the KD/GKD losses compare logit tensors, so **slice both draft and target logits to the real tokenizer vocab (151,665)** before computing any divergence.
 - Training data tokenized with the **target's** tokenizer/chat template is directly usable by any Qwen2.5 draft. The drafts' own templates are irrelevant — always render with the target's template.
 
 ### 1.3 Target's tool-call format (from the Coder-14B chat template; re-verify with a golden test, §6)
@@ -40,6 +40,7 @@
 ### 1.4 Memory / serving budget (H100 80 GB)
 
 - Weights: target ~28 GB + draft 1–3 GB → ~31 GB. Roughly half the GPU remains for KV cache and activations; batch 32 at 8–16k context fits comfortably. If OOM: cap `max_model_len`, or raise `gpu_memory_utilization` to 0.92, in that order.
+- **Training (Stage 2):** frozen target ~28 GB + draft full FT with AdamW (~8 GB for 0.5B, ~24 GB for 1.5B) + activations. 0.5B is comfortable; 1.5B is tight but fits with gradient checkpointing and small micro-batches. Compute losses on assistant tokens only to keep 152k-vocab logits small.
 - No tensor parallelism needed (single GPU, 14B).
 
 ### 1.5 Serving stack
@@ -54,22 +55,30 @@
 
 ---
 
-## 2. Method: on-policy distillation, concretely
+## 2. Method: two-stage distillation (DistillSpec-style), concretely
 
-"On-policy" = the draft's training targets are **the target model's own generations**, not ChatGPT-written ToolBench answer trajectories and not human text. Concretely:
+"On-policy" = the draft learns from **its own sampled continuations**, scored token-by-token by the frozen target. This matches inference, where the target verifies the draft's own guesses, and directly targets acceptance: per-token acceptance equals the overlap Σ min(p, q) between target and draft distributions.
 
-1. Take ToolBench conversation prefixes (user turn(s) + tool schemas, possibly earlier tool results) as contexts.
-2. Let the **14B target** generate the assistant continuation on those contexts (greedy; see temperature note below).
-3. Fine-tune the draft (full SFT, not LoRA — 0.5B/1.5B are small, full FT is fast on an H100, and the artifact stays a plain HF model vLLM can serve as a draft) on `(context, target_continuation)` pairs, **loss masked to assistant tokens only**.
-4. Draft now imitates the target's token-level choices in exactly the format the target emits — which is what speculative acceptance measures.
+**Stage 1 — supervised KD warm-start (short):**
+1. Take ~3–5k ToolBench conversation prefixes (user turn(s) + tool schemas + prior turns incl. recorded tool results) as contexts.
+2. Let the **14B target** generate the assistant continuation greedily in vLLM, saving the **top-20 logprobs per generated token**.
+3. Fine-tune the draft (full FT, not LoRA — 0.5B/1.5B are small, full FT is fast on an H100, and the artifact stays a plain HF model vLLM can serve as a draft) with a KL loss against the target's top-k distribution, **loss masked to assistant tokens only**.
+4. Purpose: get the draft producing sensible tool-call states so Stage 2's feedback is useful from the first step.
 
-**Two data-generation modes** (choose by GPU-time; A is the plan, B is stretch):
-- **A. Target-regeneration (default):** use recorded ToolBench trajectories as scaffolding; for each assistant turn, keep the recorded *context* (user + tool schemas + prior turns incl. recorded tool results) but regenerate the assistant turn with the 14B target. Sequence-level on-policy for the target; replay of recorded API responses means no live API calls. Practical for 1 GPU-day.
-- **B. Full self-play rollouts (stretch, only if time remains):** target generates a tool call → replay the recorded ToolBench API response for that call → target continues → etc. More on-policy (target conditions on its own earlier calls), costs more generation time.
+**Stage 2 — on-policy distillation (main result):**
+1. Use the remaining ToolBench contexts as prompts (no target generations needed).
+2. The **draft samples** an assistant continuation; the **frozen 14B scores it** in one forward pass.
+3. Train the draft to minimize divergence between its distribution and the target's on those draft-generated tokens, loss on assistant tokens only.
+4. Mix in a fraction of Stage 1's fixed data (GKD's mixing ratio) to stabilize early training.
+5. Implementation: TRL `GKDTrainer` (student sampling, frozen teacher, mixing ratio, forward/reverse KL and JSD). Default divergence: JSD or forward KL. TVD (directly tied to acceptance) is a custom-loss ablation, P2.
+6. Cap contexts at ~4–6k tokens (trim tool lists and oldest turns) — draft HF generation is the Stage 2 bottleneck and scales with context length.
+7. Checkpoint every hour with a quick τ check on a small eval subset.
 
-**Temperature note (matches DistillSpec):** we evaluate at greedy and T=1.0. DistillSpec distills at the deployment temperature. Practical compromise for the time budget: generate distillation data at **greedy** (tool calling is usually deployed greedy), and if time remains generate a second pool at T=1.0 and distill a second checkpoint. Greedy first.
+**Temperature note:** we evaluate at greedy and T=1.0. Stage 1 data is generated greedy (tool calling is usually deployed greedy). In Stage 2, the draft samples at T=1.0 so it visits a spread of its own states; gains are reported separately for greedy and T=1.0 evaluation, since they will differ.
 
-**SFT hyperparameters (starting point, tune only if loss diverges):** lr 1e-5 (0.5B) / 7e-6 (1.5B), cosine, 2–3 epochs, bf16, seq len 8192 with packing, global batch ~64 (grad accumulation). ToolBench prompts with many tool schemas are long — log the length distribution during local prep; left-truncate oldest turns if a sequence exceeds the cap.
+**Ablation this produces for the memo:** untuned → Stage 1 → Stage 2, on every metric.
+
+**Hyperparameters (starting point, tune only if loss diverges):** lr 1e-5 (0.5B) / 7e-6 (1.5B), cosine, bf16, gradient checkpointing. Stage 1: 1–2 epochs, seq len 8192 with packing, global batch ~64 (grad accumulation). Stage 2: small micro-batches, max new tokens ~512 per draft sample. ToolBench prompts with many tool schemas are long — log the length distribution during local prep; left-truncate oldest turns if a sequence exceeds the cap.
 
 ---
 
@@ -82,7 +91,8 @@
   - `Yhyu13/ToolBench_toolllama_G123_dfs` (Apache-2.0): already-processed SFT-format train/eval JSON (`toolllama_G123_dfs_train.json` / `_eval.json`) — pre-formatted conversations; less pipeline code, but verify its tool-rendering is complete (tool schemas present, DFS trajectories intact) before trusting it.
   - Fallback: the OpenBMB/ToolBench GitHub release (original data + retrieval corpus).
 - **"10k subset" = 10k query–trajectory pairs** (not 10k tools). Sample across G1 (single-tool) / G2 (intra-cluster multi-tool, up to ~47 tools per query) / G3 (multi-cluster), dedupe near-identical queries, keep only trajectories that reached a final answer. Keep the G2/G3 mix — large tool-schema blocks in the prompt are exactly what makes tool-calling interesting for the n-gram baseline and the region analysis.
-- **Split:** 10k train / 500 held-out eval (same distribution).
+- **Usage:** ~3–5k contexts for Stage 1 (target generations), the rest as Stage 2 on-policy prompts.
+- **Split by tool, not randomly:** 500 held-out eval queries whose tools (and ideally categories) never appear in training, mirroring ToolBench's unseen-tool/unseen-category test splits. This prevents the eval from rewarding memorized schemas.
 - **Formatting pipeline (the local work):**
   1. Parse trajectories → message lists (`system/user/assistant/tool` roles).
   2. Collect distinct tools per conversation; render via the target's `apply_chat_template(messages, tools=tools)`.
@@ -99,29 +109,33 @@
 
 ## 4. Metrics and evaluation protocol
 
-All runs report: dataset (ToolBench-eval / xLAM), config (draft × tuned/untuned / n-gram / AR-only), k, temperature, batch, and raw tokens/sec. Every metric lands as JSON in `results/`; plots come later from the JSON, never hand-edited.
+All runs report: dataset (ToolBench-eval / xLAM), config (draft × untuned / Stage 1 / Stage 2 / n-gram / AR-only), k, temperature, batch, and raw tokens/sec. Every metric lands as JSON in `results/`; plots come later from the JSON, never hand-edited.
+
+**Uncertainty:** bootstrap 95% CIs over prompts for α and τ; wall-clock = median of 3 runs. A gain is only claimed if the CIs don't overlap.
+
+**Stage-wise table:** every metric below is reported for untuned, Stage 1, and Stage 2 side by side, including the region split.
 
 ### 4.1 Acceptance metrics (instrumented HF loop, ~100–200 prompts)
 
 - **α** per-token acceptance rate; **τ** mean accepted draft tokens per verification step. Define the convention up front in code: τ counts accepted draft tokens; the bonus token emitted after a rejection (the target's correction) and after a full acceptance counts separately as `bonus_rate`. Report both conventions in the README so numbers are comparable to other papers.
-- **Per-position acceptance α_n (n = 1..k):** does the gain hold deeper into the draft, or is it all position-1 easy tokens? Compare curves pre/post distillation.
+- **Per-position acceptance α_n (n = 1..k):** does the gain hold deeper into the draft, or is it all position-1 easy tokens? Compare curves across untuned / Stage 1 / Stage 2.
 
 ### 4.2 Wall-clock (vLLM, ~200–300 prompts)
 
-- Tokens/sec and speedup vs. plain AR decoding, for: AR-only, untuned 0.5B, untuned 1.5B, distilled draft(s), n-gram.
-- **Batch sensitivity is first-class:** measure at batch 1 and batch 8 and 32 (fixed concurrency, offline batched generate). Motivation is already in the plan: an EAGLE-3 reproduction found 2.3× at batch 4 degrading to roughly break-even at batch 32. Report the speedup-vs-batch curve for the best config and the baselines. If a bigger batch kills the speedup, that is a finding, not a failure — report it.
+- Tokens/sec and speedup vs. plain AR decoding, for: AR-only, untuned 0.5B, untuned 1.5B, Stage 1 and Stage 2 draft(s), n-gram.
+- **Batch sensitivity is first-class:** measure at batch 1 and batch 8 and 32 (fixed concurrency, offline batched generate). Motivation is already in the plan: an EAGLE-3 reproduction (E2E Networks blog) found 2.3× at batch 4 degrading to roughly break-even at batch 32. Report the speedup-vs-batch curve for the best config and the baselines. If a bigger batch kills the speedup, that is a finding, not a failure — report it.
 - Note vLLM's own caveat: logprobs/outputs can be slightly non-deterministic at larger batch; that's fine for wall-clock, and the exactness check (4.4) is run at batch 1.
 
 ### 4.3 Region-split acceptance — the differentiator
 
 - Split generated tokens into **tool-call JSON region** (between `<tool_call>` and `</tool_call>`, incl. name vs. arguments sub-spans) vs. **free-form prose region** (everything else). Label tokens via offset mapping computed in the data/eval pipeline — decode speculatively, track which token indices fall in which span.
 - Report α and τ **per region**. Hypothesis (from the agentic-serving result cited in the plan): acceptance is strongly bimodal — structured tool-call regions near 100%, prose sometimes below 10%.
-- Extra cut worth 30 minutes: within the tool-call region, **argument keys / function names** (copyable from the schema in the prompt — n-gram's home turf) vs. **argument values** (must actually be predicted). This tells you exactly which tokens the distilled draft wins on that n-gram can't steal.
+- Extra cut worth 30 minutes: within the tool-call region, **argument keys / function names** (copyable from the schema in the prompt — n-gram's home turf) vs. **argument values** (must actually be predicted). This tells you exactly which tokens the distilled draft wins on that n-gram can't steal, and whether Stage 2's gains over Stage 1 concentrate in argument values.
 
 ### 4.4 Correctness verification (gate for everything else)
 
 - Greedy, batch 1, fixed seed: compare full **token id sequences** of speculative vs. non-speculative decoding on the eval set. Require 100% identical ids (and therefore identical lengths). Also verify the n-gram method passes.
-- Sanity check of the harness before the GPU day, run locally: draft = target (same 0.5B model both roles) with greedy → α must equal exactly k... i.e. every draft token accepted, τ = k. If not, the instrumented loop is buggy.
+- Sanity check of the harness before the GPU day, run locally: draft = target (same 0.5B model both roles) with greedy → every draft token accepted, τ = k. If not, the instrumented loop is buggy.
 - If vLLM mismatches at batch 1 (numerical nondeterminism), fall back to the instrumented HF loop for the exactness claim on a 50-prompt subset and report vLLM's behavior honestly as a separate observation.
 
 ### 4.5 Sweeps
@@ -143,17 +157,18 @@ Priority-tagged so the day degrades gracefully: P0 must happen, P1 should, P2 on
 
 | Hours | Task | Priority |
 |---|---|---|
-| 0–1.5 | Env setup: clone repo, `pip install -r requirements.txt` (pinned vLLM), download target + 0.5B + 1.5B (+ Coder drafts if disk allows), smoke-test serve. Verify `speculative_config` works with this vLLM build. | P0 |
+| 0–1.5 | Env setup: clone repo, `pip install -r requirements.txt` (pinned vLLM), download target + Coder 0.5B + Coder 1.5B, smoke-test serve. Verify `speculative_config` with a draft model works with this vLLM build. | P0 |
 | 1.5–3 | Baselines: AR-only at batch 1/8/32; n-gram baseline; untuned 0.5B and 1.5B spec decode at k=5 greedy (batch 1). Exactness check (4.4). Compute untuned τ for both drafts. | P0 |
-| 3–4 | **Decision point:** pick distillation candidate via the §8 rule. Full k/temp sweep for the untuned configs (batch 1). | P0 |
-| 4–8 | Distillation data generation on GPU: 10k target regenerations (mode A). ~7M tokens aggregate; with continuous batching this is a few hours at most. Store as HF dataset + push to repo storage. | P0 |
-| 8–11 | Draft SFT (0.5B ~1 h; 1.5B ~1.5–2 h incl. eval-after-each-epoch). | P0 |
-| 11–14 | Re-benchmark distilled draft: batch 1 grid (k × temp), batch sweep, exactness re-check, region-split analysis (4.3), per-position curves. | P0 |
-| 14–16 | xLAM transfer eval (4.1/4.2/4.3 on xLAM 500). | P1 |
-| 16–18 | Second candidate distilled (the other draft size) if the first went smoothly → same battery. | P1 |
-| 18–19 | Coder-draft add-on runs; T=1.0-distilled second checkpoint. | P2 |
-| 19–22 | All plots from results JSON; README results tables; repo cleanup. | P0 |
-| 22–24 | Buffer (model download failures, OOM debugging, reruns). | — |
+| 3–3.5 | **Decision point:** pick distillation candidate via the §8 rule. | P0 |
+| 3.5–4.5 | Stage 1 data: 3–5k target generations (greedy) with top-20 logprobs. Store as HF dataset + push to repo storage. | P0 |
+| 4.5–5 | Stage 1 supervised KD warm-start. | P0 |
+| 5–8 | Stage 2 on-policy distillation, hourly checkpoints with quick τ check. | P0 |
+| 8–11 | Re-benchmark untuned / Stage 1 / Stage 2: batch 1 grid (k × temp), batch sweep, exactness re-check, region-split analysis (4.3), per-position curves, CIs. Full k/temp sweep for untuned configs here too. | P0 |
+| 11–13 | xLAM transfer eval (4.1/4.2/4.3 on xLAM 500). | P1 |
+| 13–16 | Second candidate (the other draft size) through Stage 1 + Stage 2 if the first went smoothly → same battery. | P1 |
+| 16–17 | TVD-loss ablation for Stage 2. | P2 |
+| 17–20 | All plots from results JSON; README results tables; repo cleanup. | P0 |
+| 20–24 | Buffer (model download failures, OOM debugging, reruns). | — |
 
 Run everything through `scripts/run_*.sh` so the day is a sequence of typed commands, not decisions. Each run appends to `results/metrics.jsonl`; a `make report` regenerates all tables/plots from it.
 
@@ -162,11 +177,11 @@ Run everything through `scripts/run_*.sh` so the day is a sequence of typed comm
 ## 6. Local pre-work (before renting the GPU — this is where the project is actually built)
 
 1. **Repo skeleton** (§7), pinned `requirements.txt`, venv.
-2. **ToolBench download + cleaning + formatting pipeline** → 10k train / 500 eval, target-template rendering, region label maps, length-distribution report. Unit tests on golden examples.
+2. **ToolBench download + cleaning + formatting pipeline** → 10k train / 500 held-out-tool eval, target-template rendering, region label maps, length-distribution report. Unit tests on golden examples.
 3. **xLAM prep** → 500 eval prompts in xLAM-native format.
 4. **Instrumented speculative decoding loop** (draft proposes k, target verifies, greedy rejection sampling) with the §4.4 self-consistency test (draft=target ⇒ all accepted).
 5. **vLLM bench harness** (`bench_vllm.py`): given (model, spec config, prompts, params) → tokens/sec + outputs; exactness mode comparing token ids across two runs.
-6. **SFT training script** (`training/sft.py`) — tested end-to-end on a tiny model locally (e.g. random-init 0.5B or the real 0.5B for a few steps on CPU/MPS) so the GPU day never debugs training code.
+6. **Training scripts** (`training/kd_warmstart.py`, `training/onpolicy_gkd.py`) — tested end-to-end on tiny models locally (e.g. Coder-0.5B as both student and stand-in teacher for a few steps on CPU/MPS), including the vocab-slicing in the loss, so the GPU day never debugs training code.
 7. **Dry-run the whole pipeline at toy scale** (tiny model as fake target, 20 prompts) — the full loop from raw ToolBench to metrics JSON must run green on CPU before the GPU is rented.
 
 ---
@@ -181,7 +196,7 @@ Speculative_Decoding/
 ├── src/
 │   ├── data_prep/      # toolbench_download, format_qwen, xlam_prep, build_distill_data
 │   ├── serving/        # bench_vllm.py, spec_configs.py, instrumented_spec.py
-│   ├── training/       # sft.py
+│   ├── training/       # kd_warmstart.py, onpolicy_gkd.py
 │   └── analysis/       # metrics.py, region_split.py, per_position.py, plots.py
 ├── scripts/            # run_baselines.sh, run_sweep.sh, run_distill.sh, run_report.sh
 ├── results/            # metrics.jsonl, tables/, plots/   (committed)
@@ -194,13 +209,13 @@ Speculative_Decoding/
 
 Written down *before* the GPU day so choices aren't made after seeing results:
 
-1. **Draft choice rule (decision point, hour ~4):** measure untuned wall-clock speedup vs. AR at k=5, greedy, batch 1 for both candidates. Distill the one with the higher untuned speedup. Tie-break toward 0.5B (cheaper to train and verify; more headroom). Distill the second candidate only as P1.
+1. **Draft choice rule (decision point, hour ~3):** measure untuned wall-clock speedup vs. AR at k=5, greedy, batch 1 for both candidates. Distill the one with the higher untuned speedup. Tie-break toward 0.5B (cheaper to train and verify; more headroom). Distill the second candidate only as P1.
 2. **Success criteria:**
-   - **P0 (must):** exactness check passes; AR / n-gram / untuned-draft baselines all measured; τ, α, per-position and region-split analyses produced for at least one distilled draft.
-   - **P1 (should):** distilled draft beats its untuned self on τ by ≥20% *and* beats the n-gram baseline on wall-clock at batch 1, greedy, on ToolBench eval.
-   - **P2 (stretch):** gains hold at batch 8/32; xLAM transfer is positive; per-position curve shows improvement deep into the draft; second draft size distilled.
-   - Negative results (e.g. n-gram wins, speedup collapses at batch 32) are reported as findings with the region-split explanation — that's still a publishable characterization.
-3. **Eval sets frozen before the GPU day:** ToolBench 500, xLAM 500, fixed seeds, fixed prompt files committed to the repo.
+   - **P0 (must):** exactness check passes; AR / n-gram / untuned-draft baselines all measured; τ, α, per-position and region-split analyses produced for untuned, Stage 1, and Stage 2 of at least one draft.
+   - **P1 (should):** Stage 2 draft beats its untuned self on τ by ≥20% (non-overlapping CIs) *and* beats the n-gram baseline on wall-clock at batch 1, greedy, on ToolBench eval; Stage 2 measurably beats Stage 1.
+   - **P2 (stretch):** gains hold at batch 8/32; xLAM transfer is positive; per-position curve shows improvement deep into the draft; second draft size distilled; TVD ablation.
+   - Negative results (e.g. n-gram wins, speedup collapses at batch 32, on-policy adds little over Stage 1) are reported as findings with the region-split explanation — that's still a publishable characterization.
+3. **Eval sets frozen before the GPU day:** ToolBench 500 (held-out tools), xLAM 500, fixed seeds, fixed prompt files committed to the repo.
 
 ---
 
@@ -210,17 +225,20 @@ Written down *before* the GPU day so choices aren't made after seeing results:
 |---|---|
 | Original ToolBench repo gated | Use verified mirrors (§3.1); inspect both during local prep; fallback to GitHub release. |
 | vLLM version drift / spec-decode API changes | Pin exact version; `speculative_config` smoke test is the first GPU-hour task; keep the instrumented HF loop as the fallback measurement path. |
-| Target hallucinates argument keys not in schema (distills bad habits into draft) | Spot-check 50 generations during data gen; drop trajectories with invalid tool calls (schema-validated); log the drop rate. |
+| Target hallucinates argument keys not in schema (distills bad habits into draft) | Spot-check 50 generations during Stage 1 data gen; drop trajectories with invalid tool calls (schema-validated); log the drop rate. |
 | Draft never beats n-gram | That's a legitimate result — the region-split analysis (which tokens n-gram steals vs. which the draft must predict) is the deliverable either way. |
 | Batch non-determinism confuses exactness check | Exactness at batch 1 only; wall-clock at all batches; report separately. |
 | OOM at batch 32 with long ToolBench prompts (big schema blocks) | Cap `max_model_len` (16k), then `gpu_memory_utilization` 0.92; length distribution is measured locally in advance so this isn't a surprise. |
+| Vocab-size mismatch breaks KD/GKD loss | Slice logits to 151,665 in both losses; covered by the local end-to-end test (§6). |
+| Stage 2 slower than planned (draft generation on long contexts) | Cap contexts at 4–6k tokens; reduce prompt count; hourly checkpoints mean any checkpoint is usable. |
+| Stage 2 unstable early | Stage 1 warm-start + mixing in fixed data; fall back to the Stage 1 checkpoint as the reported result if Stage 2 diverges. |
 | GPU day slips on setup | Everything local (§6) is done first; day-0 checklist in the runbook is mechanical. |
 
 ---
 
 ## 10. Open questions
 
-- **"E2E Networks"** in the original plan (under metrics): assumed here to mean end-to-end throughput (folded into §4.2). If it's the GPU *provider* (E2E Networks is an H100 rental option), it belongs in the runbook instead — clarify and move.
 - Exact xLAM test split: the 60k file is a train set; since we use it eval-only, a random 500 slice suffices (no leakage), but if a canonical xLAM test set exists, prefer it.
-- ToolBench mirror choice (raw trajectories vs. pre-processed SFT format) — decide during local prep after inspecting both.
-- Whether to also distill a T=1.0 checkpoint (second data pool) — decide at hour 18 based on remaining time; greedy pool is the default.
+- ToolBench mirror choice (raw trajectories vs. pre-processed SFT format) — decide during local prep after inspecting both, and confirm the mirror preserves tool/category IDs needed for the held-out-tool split.
+- Stage 2 draft sampling temperature (T=1.0 default) — ablate greedy sampling only if time remains.
+- **Next steps for the memo:** AdaSPEC-style token filtering (train only on tokens the draft can realistically learn), and an EAGLE-3 head as the higher-ceiling follow-up.
