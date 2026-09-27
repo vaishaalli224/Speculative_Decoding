@@ -12,8 +12,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODEL="${MODEL:-Qwen/Qwen2.5-Coder-14B-Instruct}"
-DRAFT05="${DRAFT05:-Qwen/Qwen2.5-Coder-0.5B-Instruct}"
-DRAFT15="${DRAFT15:-Qwen/Qwen2.5-Coder-1.5B-Instruct}"
+DRAFT05="${DRAFT05:-drafts/coder-0.5b-padded}"
+DRAFT15="${DRAFT15:-drafts/coder-1.5b-padded}"
 LIMIT="${LIMIT:-200}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 METRICS="${METRICS:-results/metrics.jsonl}"

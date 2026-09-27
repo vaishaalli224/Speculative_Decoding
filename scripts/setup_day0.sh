@@ -101,6 +101,19 @@ for repo in (
     print(f"  {repo} -> {p} ({n} files)")
 EOF
 
+echo "== [4b/5] draft embedding padding (vLLM requires equal vocab_size) =="
+# vLLM 0.30.0 SpeculativeConfig hard-rejects draft/target pairs whose
+# config.vocab_size differ (152,064 target vs 151,936 drafts — caught by
+# this script's own smoke test on the rental, 2026-09-27). Pad each
+# draft's embedding to the target's vocab with zero rows; prepare_draft
+# gates on greedy parity before saving (src/serving/prepare_draft.py).
+for D in 0.5B 1.5B; do
+  SRC="Qwen/Qwen2.5-Coder-${D}-Instruct"
+  OUT="drafts/coder-${D,,}-padded"
+  "$VENV_DIR/bin/python" -m src.serving.prepare_draft \
+      --draft "$SRC" --out "$OUT" --dtype bfloat16
+done
+
 echo "== [5/5] vLLM speculative_config smoke test (plan §1.5) =="
 # 5 frozen prompts through each spec method, one engine per subprocess —
 # the pinned build must accept both §1.5 config shapes before any number
@@ -114,7 +127,7 @@ import pyarrow.parquet as pq
 method = sys.argv[1]
 prompts = pq.read_table("frozen/xlam_eval.parquet").column("input_ids")[:5].to_pylist()
 cfg = (
-    build_spec_config("draft_model", "Qwen/Qwen2.5-Coder-0.5B-Instruct", 5)
+    build_spec_config("draft_model", "drafts/coder-0.5b-padded", 5)
     if method == "draft_model"
     else build_spec_config("ngram", num_speculative_tokens=5)
 )

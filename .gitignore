@@ -17,3 +17,6 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Padded draft artifacts (setup_day0 step 4b; regenerated on host)
+drafts/
