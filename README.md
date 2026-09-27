@@ -37,8 +37,28 @@ Reproduce from scratch (Python 3.12 venv, pinned requirements.txt):
 .venv/bin/python -m src.data_prep.toolbench_clean build --split eval
 .venv/bin/python -m src.data_prep.toolbench_clean build --split prefixes
 .venv/bin/python -m src.data_prep.freeze_splits freeze     # rebuild frozen/ + manifest
-.venv/bin/python -m pytest tests/                          # 41 tests
+.venv/bin/python -m pytest tests/                          # 63 tests
 ```
+
+## Acceptance evaluation (plan.md §6.4 — done)
+
+`src/analysis/eval_acceptance.py` turns the instrumented loop's event stream
+(JSONL, one object per verification step) into every §4.1–4.3 metric: α, τ,
+bonus_rate, per-position α_n, region-split α (prose / tool-call JSON / tag
+/ final answer), the name-vs-arguments sub-cut, bootstrap 95% CIs, and
+per-prompt records:
+
+```bash
+.venv/bin/python -m src.analysis.eval_acceptance events.jsonl \
+    --records data/processed/toolbench/eval --subcut --k 5 \
+    --out results/report.json --per-prompt results/per_prompt.jsonl
+```
+
+Built and golden-tested before the loop exists: the event schema and the
+α/τ/bonus counting conventions are pinned in the module docstring and in
+`tests/test_eval_acceptance.py` (hand-computed reference cases). Multi-turn
+records carry a `turn` field per event; the cursor resets at each
+assistant-turn boundary (derived from the record's labels).
 
 `frozen/` is the GPU-day entry point (plan.md §6.3): xLAM-500 + TB-500 eval
 parquets, the Stage-1 (5k seeded xLAM sample) / Stage-2 (45k TB prefixes +
@@ -67,7 +87,9 @@ re-checks every checksum and the held-out disjointness properties from
 
 ## Testing
 
-41 tests: golden template/region facts, xLAM conversion, ToolBench cleaning
+63 tests: golden template/region facts, xLAM conversion, ToolBench cleaning
 (columnar conversations, `Action Input:` variants, JSON `true/false`
 payloads, retry-draft blocks, truncated envelopes, retry user turns, Finish
-conversion), and freeze tamper-detection.
+conversion), freeze tamper-detection, and acceptance-metrics golden cases
+(α/τ/bonus conventions, per-position scoring, region/sub-cut assignment,
+bootstrap CIs, the §4.4 self-consistency event shape).

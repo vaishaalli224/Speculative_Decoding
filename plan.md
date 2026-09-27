@@ -185,11 +185,12 @@ Run everything through `scripts/run_*.sh` so the day is a sequence of typed comm
 1. **Repo skeleton** (§7), pinned `requirements.txt`, venv. ✅ done 2026-09-26 (Python 3.12 venv with `datasets`/`huggingface_hub`/`python-dotenv` pinned; ToolBench mirror + xLAM downloaded to `data/raw/`).
 2. **Data pipeline** ✅ done 2026-09-26 (xLAM carve + render verified at commit c4f6f1d; ToolBench cleaning this session: 47,870 clean convs of 187,542 (25.5%; 595 duplicate queries, rest filtered by give_answer/parse/valid-name rules), TB-500 rare-tool carve = 416 held-out tools, 45,023 Stage 2 prefix convs (94.1%). TB-500 rendered: median 920 tok, p95 2.2k, max 4.1k; 5.1% of tokens in tool-call region, 7.6% in final-answer region. 22 golden tests in `tests/test_toolbench_clean.py`, all passing.)
 3. **Split-freezing** ✅ done 2026-09-26 (`src/data_prep/freeze_splits.py freeze|verify`; `frozen/` committed: xLAM-500 + TB-500 parquets, stage1/train-pool/eval/prefix index files, held-out lists, sha256 manifest incl. raw-data arrow checksums. `verify` re-checks checksums + held-out disjointness from frozen/ alone and is GPU-day step 0; 5 tests in `tests/test_freeze_splits.py`, incl. tamper detection).
-4. **Instrumented speculative decoding loop** (draft proposes k, target verifies, greedy rejection sampling) with the §4.4 self-consistency test (draft=target ⇒ all accepted).
-5. **vLLM bench harness** (`bench_vllm.py`): given (model, spec config, prompts, params) → tokens/sec + outputs; exactness mode comparing token ids across two runs.
-6. **Training scripts** (`training/kd_warmstart.py`, `training/onpolicy_gkd.py`) — tested end-to-end on tiny models locally (e.g. Coder-0.5B as both student and stand-in teacher for a few steps on CPU/MPS), including the vocab-slicing in the loss, so the GPU day never debugs training code.
-7. **Dry-run the whole pipeline at toy scale** (tiny model as fake target, 20 prompts) — the full loop from raw xLAM + raw ToolBench to metrics JSON must run green on CPU before the GPU is rented.
-8. **Stage 2 mixing:** fix the xLAM:TB prefix ratio when building Stage 2 context files (default 1:1 by conversation; ablate only if time remains).
+4. **Evaluation script** ✅ done 2026-09-27 (`src/analysis/eval_acceptance.py` + 22 golden tests in `tests/test_eval_acceptance.py`): consumes the acceptance-event stream the instrumented loop will emit and produces every §4.1–4.3 metric — α, τ, `bonus_rate`, per-position α_n, region-split α (prose / tool-call JSON / tag / final answer) + name-vs-arguments sub-cut, bootstrap 95% CIs over prompts, per-prompt JSONL. Event schema pinned in the module docstring: one JSON object per verification step (`query_id`, `step`, optional `turn` for multi-turn records, `draft_tokens`, `accept_mask`, `correction_token`, `eos`). Counting conventions (golden-tested on hand-computed cases): a rejection at position j scores positions 0..j (post-rejection positions get no verdict, so they don't deflate α_n); τ = accepted draft tokens per step, bonus/correction counted separately as `bonus_rate`; per-turn streams reset the position cursor at each assistant-turn boundary (turn starts derived from the record's labels). Validated end-to-end on a 20-record real TB-500 event stream: flat α = exact weighted mean of region αs, per-prompt sums == flat numerators, zero context-region proposals (the protocol contract — the loop must generate per assistant turn, not across the whole record). Torch-free.
+5. **Instrumented speculative decoding loop** (draft proposes k, target verifies, greedy rejection sampling) emitting the §6.4 event stream, with the §4.4 self-consistency test (draft=target ⇒ all accepted).
+6. **vLLM bench harness** (`bench_vllm.py`): given (model, spec config, prompts, params) → tokens/sec + outputs; exactness mode comparing token ids across two runs.
+7. **Training scripts** (`training/kd_warmstart.py`, `training/onpolicy_gkd.py`) — tested end-to-end on tiny models locally (e.g. Coder-0.5B as both student and stand-in teacher for a few steps on CPU/MPS), including the vocab-slicing in the loss, so the GPU day never debugs training code.
+8. **Dry-run the whole pipeline at toy scale** (tiny model as fake target, 20 prompts) — the full loop from raw xLAM + raw ToolBench to metrics JSON must run green on CPU before the GPU is rented.
+9. **Stage 2 mixing:** fix the xLAM:TB prefix ratio when building Stage 2 context files (default 1:1 by conversation; ablate only if time remains).
 
 ---
 
@@ -204,7 +205,7 @@ Speculative_Decoding/
 │   ├── data_prep/      # download_datasets, xlam_prep (carve+render), toolbench_clean (parse+convert+carve), build_distill_data
 │   ├── serving/        # bench_vllm.py, spec_configs.py, instrumented_spec.py
 │   ├── training/       # kd_warmstart.py, onpolicy_gkd.py
-│   └── analysis/       # metrics.py, region_split.py, per_position.py, plots.py
+│   └── analysis/       # eval_acceptance.py (§4.1–4.3 metrics from loop events), plots.py
 ├── scripts/            # run_baselines.sh, run_sweep.sh, run_distill.sh, run_report.sh
 ├── results/            # metrics.jsonl, tables/, plots/   (committed)
 └── tests/              # golden render tests, harness self-consistency tests
@@ -250,6 +251,6 @@ Written down *before* the GPU day so choices aren't made after seeing results:
 
 ## 10. Open questions
 
-- Stage 2 mixing ratio xLAM : ToolBench prefixes (default 1:1 by conversation, §6.8) — ablate only if time remains.
+- Stage 2 mixing ratio xLAM : ToolBench prefixes (default 1:1 by conversation, §6.9) — ablate only if time remains.
 - Stage 2 draft sampling temperature (T=1.0 default) — ablate greedy sampling only if time remains.
 - **Next steps for the memo:** AdaSPEC-style token filtering (train only on tokens the draft can realistically learn), and an EAGLE-3 head as the higher-ceiling follow-up.
