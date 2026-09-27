@@ -66,6 +66,13 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
     "$PY_BIN" -m venv "$VENV_DIR"
   }
 fi
+# vLLM owns its dependency tree (humming-kernels[cu13], flashinfer, ...):
+# install it FIRST, alone, then the project tooling — pinning vLLM's
+# transitive deps alongside it makes pip fail (ResolutionImpossible; hit
+# 2026-09-27 on the rental). requirements-h100.txt documents this too.
+if ! "$VENV_DIR/bin/python" -c "import vllm" 2>/dev/null; then
+  "$VENV_DIR/bin/pip" install -q "vllm==0.30.0" "torch==2.13.0"
+fi
 "$VENV_DIR/bin/pip" install -q -r requirements-h100.txt
 "$VENV_DIR/bin/python" -c "import vllm; print('  vllm', vllm.__version__)"
 "$VENV_DIR/bin/python" -c "import torch; print('  torch', torch.__version__, '| cuda:', torch.cuda.is_available(), '| dev:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
