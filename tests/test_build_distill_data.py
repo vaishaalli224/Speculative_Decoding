@@ -488,3 +488,49 @@ class TestDualWrapperG8:
         regions = unrle(rec["regions"])
         assert REGION_TAG in regions and REGION_TOOL_CALL in regions
         assert st["roundtrip_exact"]
+
+
+class TestParallelCallsG8:
+    """One wrapper may hold a SEQUENCE of JSON objects (xLAM is 52.6%
+    multi-call; the target emits call1\ncall2 inside a single pair —
+    measured 2026-09-27). raw_decode sequence parse; strict validation."""
+
+    def test_two_calls_in_one_wrapper(self, tags, tok):
+        p1 = json.dumps({"name": "get_weather", "arguments": {"city": "Paris"}})
+        p2 = json.dumps({"name": "get_weather", "arguments": {"city": "Rome"}})
+        text = tags.open_tag + "\n" + p1 + "\n" + p2 + "\n" + tags.close_tag
+        v = validate_generation(text, TOOLS, tags)
+        assert v["valid"], v["problems"]
+        assert v["n_calls"] == 1  # one wrapper (payload spans), 2 objects
+
+    def test_alt_wrapper_two_calls(self, tags, tok):
+        p1 = json.dumps({"name": "get_weather", "arguments": {"city": "Paris"}})
+        p2 = json.dumps({"name": "get_weather", "arguments": {"city": "Rome"}})
+        text = ALT_OPEN + "\n" + p1 + "\n" + p2 + "\n" + ALT_CLOSE
+        v = validate_generation(text, TOOLS, tags)
+        assert v["valid"], v["problems"]
+
+    def test_second_object_invalid_drops_record(self, tags, tok):
+        p1 = json.dumps({"name": "get_weather", "arguments": {"city": "Paris"}})
+        p2 = json.dumps({"name": "nope", "arguments": {}})
+        text = tags.open_tag + "\n" + p1 + "\n" + p2 + "\n" + tags.close_tag
+        v = validate_generation(text, TOOLS, tags)
+        assert not v["valid"]
+        assert any("unknown function" in x for x in v["problems"])
+
+    def test_trailing_garbage_fails(self, tags, tok):
+        good = json.dumps({"name": "get_weather", "arguments": {"city": "Paris"}})
+        text = tags.open_tag + "\n" + good + " oops {" + "\n" + tags.close_tag
+        v = validate_generation(text, TOOLS, tags)
+        assert not v["valid"]
+        assert any("not JSON" in x for x in v["problems"])
+
+    def test_whitespace_only_wrapper_drops(self, tags, tok):
+        # an empty wrapper carries only whitespace between the tags; the
+        # span finder yields it but no JSON object parses -> record drops
+        # (pre-existing behavior; the reason string differs from the
+        # zero-span case, both drop the record)
+        text = tags.open_tag + "\n" + tags.close_tag
+        v = validate_generation(text, TOOLS, tags)
+        assert not v["valid"]
+        assert v["problems"]

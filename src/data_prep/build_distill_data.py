@@ -235,6 +235,31 @@ def _schema_props(tools: list[dict]) -> dict[str, dict]:
     return {t["function"]["name"]: t["function"].get("parameters", {}) for t in tools}
 
 
+_JSON_DEC = json.JSONDecoder()
+
+
+def _parse_call_sequence(payload: str) -> list | None:
+    """Parse a wrapper payload as a sequence of JSON values (G8: parallel
+    calls). Returns the list of decoded values, or None on the first
+    parse failure / trailing garbage (the record fails G4, not repaired)."""
+    vals = []
+    i = 0
+    n = len(payload)
+    dec = _JSON_DEC
+    while True:
+        while i < n and payload[i] in " \t\r\n":
+            i += 1
+        if i >= n:
+            break
+        try:
+            v, j = dec.raw_decode(payload, i)
+        except ValueError:
+            return None
+        vals.append(v)
+        i = j
+    return vals if vals else None
+
+
 def validate_generation(text: str, tools: list[dict], tags) -> dict:
     """G4: schema-validate every tool call in a generation against the
     example's own schemas. Valid iff there is >=1 call and every call has
@@ -250,33 +275,37 @@ def validate_generation(text: str, tools: list[dict], tags) -> dict:
     props = _schema_props(tools)
     names = set(props)
     for p in payloads:
-        p = p.strip()
-        try:
-            call = json.loads(p)
-        except ValueError:
+        # G8 (parallel calls): one wrapper may hold a SEQUENCE of JSON
+        # objects (xLAM is 52.6% multi-call; the target emits
+        # "{call1}\n{call2}" inside a single pair) — parse with
+        # raw_decode until the span is exhausted; every object must
+        # validate. A non-object or trailing garbage fails the record.
+        calls = _parse_call_sequence(p)
+        if calls is None:
             problems.append(f"payload not JSON: {p[:60]!r}")
             continue
-        if not isinstance(call, dict):
-            problems.append(f"payload not an object: {p[:60]!r}")
-            continue
-        name = call.get("name")
-        args = call.get("arguments", {})
-        if name not in names:
-            problems.append(f"unknown function name: {name!r}")
-            continue
-        if not isinstance(args, dict):
-            problems.append(f"arguments not an object for {name!r}")
-            continue
-        schema = props[name] or {}
-        allowed = set(schema.get("properties", {}))
-        required = set(schema.get("required", []))
-        keys = set(args)
-        if keys - allowed:
-            problems.append(
-                f"{name}: keys outside schema: {sorted(keys - allowed)}")
-        missing = required - keys
-        if missing:
-            problems.append(f"{name}: missing required: {sorted(missing)}")
+        for call in calls:
+            if not isinstance(call, dict):
+                problems.append(f"payload not an object: {str(call)[:60]!r}")
+                continue
+            name = call.get("name")
+            args = call.get("arguments", {})
+            if name not in names:
+                problems.append(f"unknown function name: {name!r}")
+                continue
+            if not isinstance(args, dict):
+                problems.append(f"arguments not an object for {name!r}")
+                continue
+            schema = props[name] or {}
+            allowed = set(schema.get("properties", {}))
+            required = set(schema.get("required", []))
+            keys = set(args)
+            if keys - allowed:
+                problems.append(
+                    f"{name}: keys outside schema: {sorted(keys - allowed)}")
+            missing = required - keys
+            if missing:
+                problems.append(f"{name}: missing required: {sorted(missing)}")
     return {"valid": not problems, "n_calls": len(payloads), "problems": problems}
 
 
