@@ -309,7 +309,7 @@ def validate_generation(text: str, tools: list[dict], tags) -> dict:
             keys = set(args)
             if keys - allowed:
                 problems.append(
-                    f"{name}: keys outside schema: {sorted(keys - allowed)}")
+                    f"keys outside schema for {name!r}: {sorted(keys - allowed)}")
             missing = required - keys
             if missing:
                 problems.append(f"missing required keys for {name!r}: {sorted(missing)}")
