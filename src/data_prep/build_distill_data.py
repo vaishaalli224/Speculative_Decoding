@@ -456,7 +456,12 @@ def assemble(gens: list[dict], limit: int | None = None) -> tuple[list[dict], di
     reasons: dict[str, int] = {}
     for st in drops:
         for p in st["problems"]:
-            key = p.split(":")[0]
+            # stable reason keys: the message prefix before ": " —
+            # "unknown function name: 'x'" -> "unknown function name".
+            # (The old p.split(":")[0] mis-keyed "f: missing required" as
+            # the bare function name.)
+            key = p.split(": ")[0] if ": " in p else p
+            key = key.split("'")[0].strip()
             reasons[key] = reasons.get(key, 0) + 1
     stats = {
         "n_stage1": n,

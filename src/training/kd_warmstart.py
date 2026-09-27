@@ -252,7 +252,7 @@ def kd_row_losses(
             f"student vocab {V} < real vocab {real_vocab} — the draft cannot "
             "have a smaller vocab than the tokenizer (K1)"
         )
-    if int(teacher_ids[row_valid].max(initial=0)) >= real_vocab:
+    if bool(row_valid.any()) and int(teacher_ids[row_valid].max()) >= real_vocab:
         # The target's own top-k must live in the real vocab. A padding id
         # here would mean the data pipeline stored ids the tokenizer can't
         # emit — clamp()ing it onto some real token would silently corrupt
@@ -472,9 +472,7 @@ class KDWarmstartTrainer:
                     win_rows += len(pack.loss_positions)
                 accum += 1
                 if accum == self.grad_accum:
-                    optimizer.step()
-                    sched.step()
-                    optimizer.zero_grad(set_to_none=True)
+                    self._step(optimizer, sched)
                     accum = 0
                     global_step += 1
                     n_label_tokens += win_rows
@@ -482,21 +480,28 @@ class KDWarmstartTrainer:
                         step_log.append({
                             "step": global_step,
                             "epoch": epoch,
-                            "loss": round(win_kl_sum / max(1, win_rows), 5),
+                            "loss": round(win_loss_sum / max(1, win_rows), 5),
                             "lr": sched.get_last_lr()[0],
                         })
-                    win_kl_sum, win_ce_sum, win_rows = 0.0, 0.0, 0
-            if accum:  # flush a partial window at the epoch boundary
-                optimizer.step()
-                sched.step()
-                optimizer.zero_grad(set_to_none=True)
+                    win_loss_sum, win_rows = 0.0, 0
+            if accum:  # flush a partial window at the epoch boundary. The
+                # flushed micro-batches were pre-divided by the full
+                # grad_accum, so rescale their cached grads up by
+                # grad_accum/accum — one-token-one-vote must hold here too.
+                if accum < self.grad_accum:
+                    scale = self.grad_accum / accum
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            p.grad.mul_(scale)
+                self._step(optimizer, sched)
                 global_step += 1
                 n_label_tokens += win_rows
                 step_log.append({
                     "step": global_step, "epoch": epoch,
-                    "loss": round(win_kl_sum / max(1, win_rows), 5),
+                    "loss": round(win_loss_sum / max(1, win_rows), 5),
                     "lr": sched.get_last_lr()[0],
                 })
+                win_loss_sum, win_rows = 0.0, 0
         wall = time.perf_counter() - t0
 
         model.eval()
@@ -532,9 +537,10 @@ class KDWarmstartTrainer:
         return meta
 
     @staticmethod
-    def optimizer_lr(optimizer):
-        """AdamW param-groups carry the lr; hand the scheduler the right one."""
-        return optimizer
+    def _step(optimizer, sched) -> None:
+        optimizer.step()
+        sched.step()
+        optimizer.zero_grad(set_to_none=True)
 
 
 def _git_commit() -> str | None:
