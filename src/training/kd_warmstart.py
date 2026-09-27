@@ -252,6 +252,16 @@ def kd_row_losses(
             f"student vocab {V} < real vocab {real_vocab} — the draft cannot "
             "have a smaller vocab than the tokenizer (K1)"
         )
+    if int(teacher_ids[row_valid].max(initial=0)) >= real_vocab:
+        # The target's own top-k must live in the real vocab. A padding id
+        # here would mean the data pipeline stored ids the tokenizer can't
+        # emit — clamp()ing it onto some real token would silently corrupt
+        # the loss, so fail loudly instead (the assembled-data contract
+        # keeps this unreachable; empirically the target's top-20 never
+        # contains padding ids on tool-call states, verified 2026-09-27).
+        raise AssertionError(
+            "teacher row contains a padding id (>= real vocab) — bad KD data"
+        )
     sl = student_logits[:, :real_vocab].float()          # K1 slice
     logp = torch.log_softmax(sl, dim=-1)                 # renorm over real vocab
     ce = torch.nn.functional.cross_entropy(sl, labels, reduction="none")
@@ -267,7 +277,7 @@ def kd_row_losses(
         )
         p_t = torch.exp(t_lps)
         s_lps = torch.gather(  # student logp at the teacher's support
-            logp[idx], 1, teacher_ids[idx].clamp(max=real_vocab - 1).long()
+            logp[idx], 1, teacher_ids[idx].long()
         )
         terms = p_t * (t_lps - s_lps)
         # 0 * -inf is NaN on pad columns — mask, never rely on p_t == 0
@@ -424,7 +434,7 @@ class KDWarmstartTrainer:
         n_micro = math.ceil(len(packs) / self.micro_bs)
         total_steps = math.ceil(n_micro / self.grad_accum) * self.epochs
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer_lr(optimizer), T_max=max(1, total_steps)
+            optimizer, T_max=max(1, total_steps)
         )
 
         device = next(model.parameters()).device
@@ -434,7 +444,7 @@ class KDWarmstartTrainer:
         n_label_tokens = 0
         for epoch in range(self.epochs):
             accum = 0
-            win_kl_sum, win_ce_sum, win_rows = 0.0, 0.0, 0
+            win_loss_sum, win_rows = 0.0, 0
             for bstart in range(0, len(packs), self.micro_bs):
                 batch_packs = packs[bstart : bstart + self.micro_bs]
                 rows_in_batch = sum(len(p.loss_positions) for p in batch_packs)
@@ -454,11 +464,11 @@ class KDWarmstartTrainer:
                                 logits_to_keep=keep, use_cache=False)
                     rows = kd_row_losses(out.logits[0], t_ids, t_lps, valid,
                                          labels, self.real_vocab, self.sft_weight)
-                    # token-weighted across the micro-batch and the
-                    # accumulation window; K4 keeps records independent
+                    # token-weighted: divide by this micro-batch's rows so a
+                    # window of uneven micro-batches keeps one-token-one-vote
+                    # within it; grad_accum on top handles the window
                     (rows.sum() / (rows_in_batch * self.grad_accum)).backward()
-                    win_kl_sum += float(rows.sum().item())  # bookkeeping only
-                    win_ce_sum += 0.0
+                    win_loss_sum += float(rows.sum().item())
                     win_rows += len(pack.loss_positions)
                 accum += 1
                 if accum == self.grad_accum:

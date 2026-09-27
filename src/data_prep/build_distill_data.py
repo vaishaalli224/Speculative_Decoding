@@ -240,8 +240,12 @@ _JSON_DEC = json.JSONDecoder()
 
 def _parse_call_sequence(payload: str) -> list | None:
     """Parse a wrapper payload as a sequence of JSON values (G8: parallel
-    calls). Returns the list of decoded values, or None on the first
-    parse failure / trailing garbage (the record fails G4, not repaired)."""
+    calls). The target separates parallel calls with a comma (measured
+    2026-09-27: "{call1},\n{call2}" — a JSON array's elements without
+    the brackets), so a comma between values is accepted as a separator;
+    everything else must parse cleanly. Returns the list of decoded
+    values, or None on the first parse failure / trailing garbage (the
+    record fails G4, not repaired)."""
     vals = []
     i = 0
     n = len(payload)
@@ -251,6 +255,9 @@ def _parse_call_sequence(payload: str) -> list | None:
             i += 1
         if i >= n:
             break
+        if vals and payload[i] == ",":
+            i += 1
+            continue
         try:
             v, j = dec.raw_decode(payload, i)
         except ValueError:
