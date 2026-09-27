@@ -239,6 +239,7 @@ def build_record(
     messages: list[dict],
     tools: list[dict],
     query_id: Any,
+    final_answer_text: str | None = None,
 ) -> dict:
     """Render + tokenize + label one conversation -> train/eval record.
 
@@ -246,6 +247,14 @@ def build_record(
     elsewhere. A token must not straddle an assistant-turn boundary — that
     would mean the tokenizer merged template boilerplate into a loss token,
     which the Qwen pretokenizer does not do for our data; assert to be sure.
+
+    final_answer_text: for ToolBench conversations whose last assistant turn
+    is a converted Finish/give_answer call (thought prose + final answer),
+    the sub-span of the final answer gets REGION_FINAL_ANSWER instead of
+    REGION_PROSE. The template inserts message content verbatim after the
+    assistant header, so the span offset is computed from the position of
+    the text within the last message's content — no text search in the full
+    render. The verbatim property is asserted.
     """
     full_text = render_sequence(messages, tools)
     tags = get_tool_call_tags()
@@ -253,7 +262,27 @@ def build_record(
     tag_spans = find_tag_spans(full_text, tags)
     assistant_spans = find_assistant_turns(full_text)
 
-    enc = tokenize_with_regions(full_text, tool_call_spans, tag_spans)
+    final_answer_spans: list[tuple[int, int]] | None = None
+    if final_answer_text:
+        content = messages[-1]["content"]
+        try:
+            offset = content.rindex(final_answer_text)
+        except ValueError:
+            raise AssertionError(
+                "final-answer text not found in last message content — "
+                "caller and content are out of sync"
+            ) from None
+        span_start = assistant_spans[-1][0] + offset
+        span = (span_start, span_start + len(final_answer_text))
+        if full_text[span[0] : span[1]] != final_answer_text:
+            raise AssertionError(
+                "final-answer span desync — template did not insert content verbatim"
+            )
+        final_answer_spans = [span]
+
+    enc = tokenize_with_regions(
+        full_text, tool_call_spans, tag_spans, final_answer_spans
+    )
     ids, offsets, regions = enc["input_ids"], enc["offsets"], enc["regions"]
 
     labels = [-100] * len(ids)

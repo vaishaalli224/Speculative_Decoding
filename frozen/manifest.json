@@ -1,0 +1,77 @@
+{
+  "code_commit": "c4f6f1d5c0415ab5af146838cd267c9c01346fe9",
+  "dataset_stats": {
+    "tb_eval": {
+      "n": 500,
+      "n_tokens_max": 4053,
+      "n_tokens_median": 920.5,
+      "n_tokens_p95": 2252.749999999999,
+      "tokens_total": 536265
+    },
+    "xlam_eval": {
+      "n": 500,
+      "n_tokens_max": 1101,
+      "n_tokens_median": 310.0,
+      "n_tokens_p95": 507.3499999999997,
+      "tokens_total": 168711
+    }
+  },
+  "files": {
+    "stage1_idx": {
+      "bytes": 34076,
+      "sha256": "957151827788b1b339df032892992b413fbf31f2dc0a4e691b65ade4ce9ba79b"
+    },
+    "tb_eval": {
+      "bytes": 6655291,
+      "sha256": "e5370624897892a9c25043496526bfac4f7496966c8eaa85313de1d6a8c3f0ca"
+    },
+    "tb_eval_idx": {
+      "bytes": 3366,
+      "sha256": "3f5d0a357f92776aa5f458afc2974f3d66d4a8d90a89a079e9fbf8ca613d4fab"
+    },
+    "tb_heldout_tools": {
+      "bytes": 16627,
+      "sha256": "0b5104f76d47316991c9c4636ca090c944035d3730a1f8722599b03d8b88df37"
+    },
+    "tb_prefix_idx": {
+      "bytes": 333419,
+      "sha256": "f11af4e2233400f846a8540b2fea61a37d5a298b78b099e866cdfd1741e2dd73"
+    },
+    "xlam_eval": {
+      "bytes": 2115150,
+      "sha256": "743db98034e311649ca418d1d21533c9ab39109bb0d8ed8eec1ba487da4b280a"
+    },
+    "xlam_eval_idx": {
+      "bytes": 3392,
+      "sha256": "25c37caa4cfa82f3e159d41652a4cca754f307137737498c968ad36f7779a45e"
+    },
+    "xlam_heldout_functions": {
+      "bytes": 4512,
+      "sha256": "cc1e94fd3102bc243637e2308a804e2f338cf0a5b05e6375cd41fbd9b20c822f"
+    },
+    "xlam_train_pool_idx": {
+      "bytes": 393898,
+      "sha256": "f723826d8dc56e28f2d2b095e2b93eb867a2b0ab3b5d31fdda800785e16b0762"
+    }
+  },
+  "frozen_date": "2026-09-27T00:24:56Z",
+  "raw_data_sha256": {
+    "toolbench_default": {
+      "data/raw/toolbench_default/train/data-00000-of-00004.arrow": "3d163f34885b9796e34e4bb75761f6806a249baac764818126c511fab08aa4ef",
+      "data/raw/toolbench_default/train/data-00001-of-00004.arrow": "d0fea7d2c1c9f6fa5996a5dd9cafde7f328224d4025a2c826768f9ba7b9e38e2",
+      "data/raw/toolbench_default/train/data-00002-of-00004.arrow": "a1739e92d6e374cecd227599ed4e1e11f35fbb213d7c5e52f0efb7ed7b657573",
+      "data/raw/toolbench_default/train/data-00003-of-00004.arrow": "d86fe43336790f61368ae0acd03bf628bf0da70680394ca7b7436cacc634c3be",
+      "data/raw/toolbench_default/validation/data-00000-of-00001.arrow": "1d37ee8126c31f718ae5ae0bd484387b85734fe4f280bb2f2ded85fac32c3bdd"
+    },
+    "xlam": {
+      "data/raw/xlam/train/data-00000-of-00001.arrow": "0fc36150ccb94f477b77cc30f083854f35f334e684de6f80c0a73381853b8b66"
+    }
+  },
+  "schema_version": 2,
+  "stage1": {
+    "note": "seeded sample of xlam_train_pool_idx; Stage 2 xLAM contexts = train_pool - stage1",
+    "seed": 42,
+    "size": 5000
+  },
+  "stage2_mix_default": "xLAM:TB 1:1 by conversation (plan.md \u00a76.8)"
+}
