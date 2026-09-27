@@ -15,7 +15,7 @@ Speculative_Decoding/
 ├── data/                 # gitignored: raw/ (HF downloads) + processed/ (rendered splits)
 ├── src/
 │   ├── data_prep/        # download, xlam_prep, toolbench_clean, freeze_splits
-│   ├── serving/          # (upcoming) bench_vllm, instrumented_spec
+│   ├── serving/          # instrumented_spec (done), proposers; bench_vllm (upcoming)
 │   ├── training/         # (upcoming) kd_warmstart, onpolicy_gkd
 │   └── analysis/         # (upcoming) metrics, region_split, plots
 ├── scripts/              # (upcoming) run_*.sh
@@ -60,6 +60,50 @@ Built and golden-tested before the loop exists: the event schema and the
 records carry a `turn` field per event; the cursor resets at each
 assistant-turn boundary (derived from the record's labels).
 
+## Instrumented speculative-decoding loop (plan.md §6.5 — done)
+
+`src/serving/instrumented_spec.py` is the measurement half of that contract:
+a torch-free core state machine (greedy rejection sampling, Leviathan-style)
+driven by a **Proposer** protocol — an HF draft model *or* the n-gram /
+prompt-lookup matcher (`src/serving/proposers.py`) — and a Verifier
+(the frozen target). One JSON event per verification step, exactly the
+schema above. The n-gram proposer keeps the §4.3 comparison honest:
+region-split acceptance for the *cheap* baseline comes from the same
+instrumented pipeline as the drafts, which vLLM cannot provide. A no-match
+round emits a sacrificial PAD token so step semantics stay uniform.
+
+Pinned conventions (golden-tested, C1–C7 in the module docstring): rejection
+masks never carry a True after a False and events carry only the *scored
+prefix* of a proposal; EOS ends a turn with no bonus past it; the proposal
+is capped at the remaining token budget first and the bonus is dropped if
+it would overshoot `max_new_tokens` (outputs stay comparable to plain
+`generate()`); multi-turn records are generated per assistant turn with
+teacher-forced turn transitions.
+
+```bash
+# n-gram baseline over the first 100 frozen TB-500 records:
+.venv/bin/python -m src.serving.instrumented_spec frozen/tb_eval.parquet \
+    --proposer ngram --target-model Qwen/Qwen2.5-Coder-14B-Instruct \
+    --k 5 --limit 100 --dtype bfloat16 \
+    --out results/events/ngram_tb_k5.jsonl \
+    --outputs-out results/events/ngram_tb_k5_outputs.jsonl \
+    --meta-out results/events/ngram_tb_k5_meta.json
+.venv/bin/python -m src.serving.instrumented_spec frozen/xlam_eval.parquet \
+    --proposer draft --draft-model <draft-path-or-id> \
+    --target-model Qwen/Qwen2.5-Coder-14B-Instruct --k 5 --limit 100 \
+    --out results/events/draft_k5.jsonl --outputs-out ... --meta-out ...
+```
+
+Local §4.4 sanity checks (CPU fp32, tiny models — run before the GPU day;
+auto-skip unless the 0.5B weights are cached or `SPEC_REALMODELS=1`):
+
+```bash
+SPEC_REALMODELS=1 .venv/bin/python -m pytest tests/test_spec_realmodels.py
+# self-consistency: draft = target ⇒ α = 1.0, τ = k every round
+# exactness: loop output token-identical to plain greedy generate()
+#           (non-Coder 0.5B draft forces real rejections → crop path exercised)
+```
+
 `frozen/` is the GPU-day entry point (plan.md §6.3): xLAM-500 + TB-500 eval
 parquets, the Stage-1 (5k seeded xLAM sample) / Stage-2 (45k TB prefixes +
 52.8k xLAM pool) context index files, and a sha256 manifest that also
@@ -87,9 +131,13 @@ re-checks every checksum and the held-out disjointness properties from
 
 ## Testing
 
-63 tests: golden template/region facts, xLAM conversion, ToolBench cleaning
+93 tests: golden template/region facts, the instrumented loop's C1–C7 convention/multi-turn/n-gram golden cases, xLAM conversion, ToolBench cleaning
 (columnar conversations, `Action Input:` variants, JSON `true/false`
 payloads, retry-draft blocks, truncated envelopes, retry user turns, Finish
 conversion), freeze tamper-detection, and acceptance-metrics golden cases
 (α/τ/bonus conventions, per-position scoring, region/sub-cut assignment,
-bootstrap CIs, the §4.4 self-consistency event shape).
+bootstrap CIs, the §4.4 self-consistency event shape). The instrumented
+loop adds 27 torch-free golden tests (event conventions C1–C7, budget
+capping, teacher-forced turn transitions, n-gram proposer + PAD fallback)
+and 3 real-model §4.4 tests (self-consistency: draft=target ⇒ α=1.0, τ=k;
+exactness: loop output == plain greedy generate(), token-identical).
