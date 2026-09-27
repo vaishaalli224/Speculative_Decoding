@@ -146,43 +146,88 @@ def load_stage1_prompts(limit: int | None = None) -> list[dict]:
 # Generation validation (G4)
 # ---------------------------------------------------------------------------
 
+# The target's ACTUAL greedy behavior on xLAM prompts (measured 2026-09-27
+# on the rented H100, 5000 frozen Stage-1 contexts): 92.6% of valid tool
+# calls are wrapped in the SCHEMA-announcement tag pair <tools></tools>,
+# not the template-instructed assistant pair <tool_call></tool_call>
+# (payloads are always schema-valid). The template's instruction and
+# example demonstrably do not flip this at greedy -- verified by A/B
+# (default vs explicit system prompts: both leave the wrapper wrong,
+# payloads always right). The KD data must mirror what the target will
+# actually VERIFY at inference, so both wrapper pairs are accepted
+# everywhere below: payloads are validated, wrappers are never repaired
+# (a repaired tag would teach the draft to propose tokens the target
+# rejects). The deviation itself is a reported finding, not a silent fix.
+# Convention G8 (dual wrapper, golden-tested in test_build_distill_data):
+#   a tool call in a generation is <open><payload><close> for EITHER
+#   pair; nested pairs are outermost-matched (text inside a payload is
+#   payload, not a nested call).
+
+_ALT_OPEN, _ALT_CLOSE = '<tools>', '</tools>'
+
+
+def gen_tag_pairs(tags):
+    """The wrapper pairs recognized in generations (G8): the template's
+    # assistant pair plus the schema-announcement pair the target actually
+    # emits at greedy. Order: assistant pair first (canonical)."""
+    return [
+        (tags.open_tag, tags.close_tag),
+        (_ALT_OPEN, _ALT_CLOSE),
+    ]
+
 
 def find_gen_payloads(text: str, tags) -> list[tuple[int, int]]:
-    """Char spans of tool-call JSON payloads in a *generation*.
+    """Char spans of tool-call JSON payloads in a *generation* (G8).
 
     Unlike ToolCallTags.find_calls (which scans assistant turns of a full
-    render), a generation has no assistant headers yet — the tags appear
-    directly in the generated text — so the scan is flat over `text`.
+    render), a generation has no assistant headers yet -- the tags appear
+    directly in the generated text -- so the scan is flat over `text`.
+    BOTH wrapper pairs are recognized (the template's assistant pair and
+    the schema-announcement pair the target actually emits); each pair is
+    matched outermost-first, so text inside a payload never double-counts.
     Unterminated calls yield no span (their trailing text is prose for
     region purposes, and the record fails G4 validation anyway).
     """
-    spans = []
-    pos = 0
-    while True:
-        s = text.find(tags.open_tag, pos)
-        if s < 0:
-            break
-        payload_start = s + len(tags.open_tag)
-        e = text.find(tags.close_tag, payload_start)
-        if e < 0:
-            break
-        if payload_start < e:  # skip empty pairs
-            spans.append((payload_start, e))
-        pos = e + len(tags.close_tag)
-    return spans
+    raw: list[tuple[int, int]] = []
+    for open_tag, close_tag in gen_tag_pairs(tags):
+        pos = 0
+        while True:
+            s = text.find(open_tag, pos)
+            if s < 0:
+                break
+            payload_start = s + len(open_tag)
+            e = text.find(close_tag, payload_start)
+            if e < 0:
+                break
+            if payload_start < e:  # skip empty pairs
+                raw.append((payload_start, e))
+            pos = e + len(close_tag)
+    # outermost-match (G8): collect ALL pairs' spans first, then keep a
+    # span only if no other span strictly contains it (text inside a
+    # payload is payload, not a nested call -- e.g. a canonical pair
+    # occurring inside a schema-wrapped payload must not double-count)
+    kept: list[tuple[int, int]] = []
+    for span in sorted(raw):
+        if not any(a <= span[0] and span[1] <= b and (a, b) != span
+                   for a, b in raw):
+            kept.append(span)
+    return kept
 
 
 def find_gen_tag_spans(text: str, tags) -> list[tuple[int, int]]:
-    """Char spans of every open/close tag occurrence in a generation."""
+    """Char spans of every open/close tag occurrence in a generation (G8:
+    both wrapper pairs -- tag tokens are tag-region regardless of which
+    pair the target used)."""
     spans = []
-    for tag in (tags.open_tag, tags.close_tag):
-        pos = 0
-        while True:
-            i = text.find(tag, pos)
-            if i < 0:
-                break
-            spans.append((i, i + len(tag)))
-            pos = i + len(tag)
+    for open_tag, close_tag in gen_tag_pairs(tags):
+        for tag in (open_tag, close_tag):
+            pos = 0
+            while True:
+                i = text.find(tag, pos)
+                if i < 0:
+                    break
+                spans.append((i, i + len(tag)))
+                pos = i + len(tag)
     return spans
 
 

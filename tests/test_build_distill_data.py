@@ -407,3 +407,84 @@ class TestRLEInterop:
         assert len(regions) == rec["n_tokens"]
         assert all(r in (REGION_PROSE, REGION_TOOL_CALL, REGION_TAG)
                    for r in regions)
+
+# G8: the schema-announcement wrapper the target actually emits
+ALT_OPEN = '<tools>'
+ALT_CLOSE = '</tools>'
+
+
+class TestDualWrapperG8:
+    """The target's measured greedy behavior (2026-09-27, 5000-gen A/B on
+    the rented H100): 92.6% of valid calls wrapped in the SCHEMA pair,
+    payloads always valid. G8 accepts both pairs; payloads validated,
+    wrappers kept verbatim."""
+
+    def test_alt_wrapper_payload_found(self, tags, tok):
+        payload = json.dumps(
+            {"name": "get_weather", "arguments": {"city": "Paris"}})
+        text = ALT_OPEN + "\n" + payload + "\n" + ALT_CLOSE
+        spans = find_gen_payloads(text, tags)
+        assert len(spans) == 1
+        got = json.loads(text[spans[0][0]:spans[0][1]])
+        assert got["name"] == "get_weather"
+
+    def test_alt_wrapper_validates(self, tags, tok):
+        payload = json.dumps(
+            {"name": "get_weather", "arguments": {"city": "Paris"}})
+        text = ALT_OPEN + "\n" + payload + "\n" + ALT_CLOSE
+        v = validate_generation(text, TOOLS, tags)
+        assert v["valid"], v["problems"]
+        assert v["n_calls"] == 1
+
+    def test_canonical_and_alt_mixed(self, tags, tok):
+        p1 = json.dumps(
+            {"name": "get_weather", "arguments": {"city": "Paris"}})
+        p2 = json.dumps(
+            {"name": "get_weather", "arguments": {"city": "Rome"}})
+        text = (tags.open_tag + "\n" + p1 + "\n" + tags.close_tag
+                + "\n" + ALT_OPEN + "\n" + p2 + "\n" + ALT_CLOSE)
+        assert len(find_gen_payloads(text, tags)) == 2
+        v = validate_generation(text, TOOLS, tags)
+        assert v["valid"] and v["n_calls"] == 2
+
+    def test_nested_canonical_inside_alt_not_double_counted(self, tags, tok):
+        # a canonical-tag occurrence INSIDE a schema-wrapped payload is
+        # payload text, not a nested call (outermost-match, G8)
+        inner = json.dumps(
+            {"name": "get_weather", "arguments": {"city": "Paris"}})
+        text = (ALT_OPEN + "\n" + tags.open_tag + "\n" + inner + "\n"
+                + tags.close_tag + "\n" + ALT_CLOSE)
+        spans = find_gen_payloads(text, tags)
+        assert len(spans) == 1
+        # the kept span is the OUTER one: it contains the canonical tags
+        # and the JSON as payload text (outermost-match, G8)
+        kept = text[spans[0][0]:spans[0][1]]
+        assert tags.open_tag in kept and inner in kept
+        # ...and the inner canonical pair was not extracted as its own call
+        assert ALT_OPEN not in kept
+
+    def test_alt_tag_spans_are_tag_region(self, tags, tok):
+        payload = json.dumps(
+            {"name": "get_weather", "arguments": {"city": "Paris"}})
+        text = ALT_OPEN + "\n" + payload + "\n" + ALT_CLOSE
+        spans = find_gen_tag_spans(text, tags)
+        assert len(spans) == 2
+        for a, b in spans:
+            assert text[a:b] in (ALT_OPEN, ALT_CLOSE)
+
+    def test_alt_wrapper_record_regions(self, tags, tok):
+        # end-to-end: an alt-wrapped generation builds a record whose tag
+        # tokens are REGION_TAG and payload tokens are REGION_TOOL_CALL
+        from src.data_prep.build_distill_data import build_gen_record
+        from src.data_prep.render import REGION_TAG, REGION_TOOL_CALL, unrle
+
+        payload = json.dumps(
+            {"name": "get_weather", "arguments": {"city": "Paris"}})
+        text = ALT_OPEN + "\n" + payload + "\n" + ALT_CLOSE
+        gen = _gen_record_for(text)
+        prompt = {"query_id": 7, "prompt_ids": [1, 2, 3]}
+        rec, st = build_gen_record(prompt, gen, TOOLS, tags)
+        assert st["valid"], st["problems"]
+        regions = unrle(rec["regions"])
+        assert REGION_TAG in regions and REGION_TOOL_CALL in regions
+        assert st["roundtrip_exact"]
