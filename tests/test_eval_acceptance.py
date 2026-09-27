@@ -31,6 +31,7 @@ Hand-computed reference cases (single prompt, k=3):
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -44,6 +45,7 @@ from src.analysis.eval_acceptance import (
     flat_metrics,
     full_report,
     load_events,
+    load_records,
     name_vs_arguments_cut,
     per_prompt_records,
     _turn_starts_from_labels,
@@ -55,6 +57,9 @@ from src.data_prep.render import (
     REGION_TOOL_CALL,
     unrle,
 )
+
+FROZEN = Path(__file__).resolve().parents[1] / "frozen"
+REPO = Path(__file__).resolve().parents[1]
 
 
 def ev(qid, step, tokens, mask, corr=None, eos=False, turn=None):
@@ -345,3 +350,45 @@ class TestSelfConsistencyConvention:
         assert m["tau"] == pytest.approx(k)
         assert m["bonus_rate"] == 1.0
         assert all(a == 1.0 for a in m["alpha_n"])
+
+
+class TestLoadRecords:
+    """The shared frozen-record loader (moved here so the loop, the bench,
+    and this CLI share exactly one definition): committed frozen parquets
+    are the GPU host's only record source (data/ is gitignored)."""
+
+    def test_loads_frozen_parquet_with_limit(self):
+        recs = load_records(str(FROZEN / "xlam_eval.parquet"), limit=3)
+        assert len(recs) == 3
+        # frozen order: the first-N subset must be a prefix of the full set
+        assert recs[0]["query_id"] == load_records(str(FROZEN / "xlam_eval.parquet"))[0]["query_id"]
+        for r in recs:
+            assert r["input_ids"] and r["regions"] and r["labels"]
+            assert 0 < r["n_prompt_tokens"] < len(r["input_ids"])
+
+    def test_loads_save_to_disk_dir(self):
+        # the local processed datasets (same loader form as the frozen
+        # parquets; both consumers depend on it)
+        recs = load_records(str(REPO / "data" / "processed" / "xlam" / "eval"))
+        assert len(recs) == 500
+
+    def test_empty_records_fail_loudly(self, tmp_path):
+        import pyarrow.parquet as pq
+        import pyarrow as pa
+
+        p = tmp_path / "empty.parquet"
+        pq.write_table(pa.table({"query_id": []}), p)
+        with pytest.raises(SystemExit):
+            load_records(str(p))
+
+    @pytest.mark.skipif(
+        not (FROZEN / "tb_eval.parquet").exists(),
+        reason="frozen/ not built",
+    )
+    def test_frozen_parquet_roundtrip_matches_processed(self):
+        # TB-500 frozen parquet must equal the local processed build —
+        # the frozen file IS what the GPU day measures on
+        frozen_recs = load_records(str(FROZEN / "tb_eval.parquet"))
+        local_recs = load_records(str(REPO / "data" / "processed" / "toolbench" / "eval"))
+        assert [r["query_id"] for r in frozen_recs] == [r["query_id"] for r in local_recs]
+        assert frozen_recs[0]["input_ids"] == local_recs[0]["input_ids"]

@@ -7,6 +7,12 @@ those events into every acceptance metric the plan requires. It is pure
 numpy/pandas-free and torch-free, so it is built and tested before the loop
 exists — the loop's only contract is the event schema below.
 
+`load_records` (the shared frozen-record loader — the loop and the vLLM
+bench both import it from here, so there is exactly one definition) accepts
+both committed frozen/ parquets and HF save_to_disk dirs; the GPU host has
+only the former (data/ is gitignored), so every records path must go
+through it.
+
 Event schema (one JSON object per verification step, JSONL):
   {
     "query_id": <id of the eval record>,
@@ -59,7 +65,7 @@ caller passes decode=True (the payload is {"name": ..., "arguments":...}
 JSON, so the split is at the '"arguments"' key).
 
 CLI:
-  eval_acceptance.py events.jsonl --regions data/processed/... [--k 5]
+  eval_acceptance.py events.jsonl --records frozen/xlam_eval.parquet [--k 5]
       -> prints the metrics summary; --out writes the full JSON report;
          --per-prompt writes one JSONL line per prompt.
 """
@@ -88,6 +94,26 @@ SUB_ARGS = 11
 
 _CI_BOOTSTRAP_N = 1000
 _CI_SEED = 42
+
+
+def load_records(path: str, limit: int | None = None) -> list[dict]:
+    """Frozen-record loader shared by every consumer (the instrumented loop,
+    the vLLM bench, this CLI): parquet (the committed frozen/ eval sets — the
+    only form the GPU host has, since data/ is gitignored) or an HF
+    save_to_disk dir; first N records in frozen order when `limit` is set."""
+    if str(path).endswith(".parquet"):
+        import pyarrow.parquet as pq
+
+        rows = pq.read_table(path).to_pylist()
+    else:
+        from datasets import load_from_disk
+
+        rows = list(load_from_disk(path))
+    if limit is not None:
+        rows = rows[:limit]
+    if not rows:
+        raise SystemExit(f"no records in {path}")
+    return rows
 
 
 def load_events(path: str | Path) -> list[dict]:
@@ -502,8 +528,8 @@ def full_report(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("events", help="event JSONL from the instrumented loop")
-    ap.add_argument("--records", default=None, help="rendered dataset dir (HF "
-        "save_to_disk) with input_ids/regions/n_prompt_tokens, for region splits")
+    ap.add_argument("--records", default=None, help="frozen parquet or rendered "
+        "dataset dir with input_ids/regions/n_prompt_tokens, for region splits")
     ap.add_argument("--k", type=int, default=None, help="draft length cap")
     ap.add_argument("--out", default=None, help="write full JSON report here")
     ap.add_argument("--per-prompt", dest="per_prompt_out", default=None,
@@ -516,9 +542,7 @@ def main() -> None:
     events = load_events(args.events)
     records = None
     if args.records:
-        from datasets import load_from_disk
-
-        records = list(load_from_disk(args.records))
+        records = load_records(args.records)
     decode_fn = None
     if args.subcut:
         from src.data_prep.render import get_tokenizer

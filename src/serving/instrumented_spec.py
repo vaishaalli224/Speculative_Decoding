@@ -12,6 +12,9 @@ The core is a pure-Python state machine over token-id lists — torch-free
 — so every convention below is golden-tested without torch; the HF
 adapters at the bottom of this file are thin, separately-tested wrappers.
 
+Models are placed via --device (cuda:0 on the GPU host; the default "auto"
+keeps CPU/MPS behavior for the local §4.4 checks unchanged).
+
 Pinned conventions (event semantics; golden-tested in
 tests/test_instrumented_spec.py):
 
@@ -73,7 +76,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from src.analysis.eval_acceptance import _turn_starts_from_labels
+from src.analysis.eval_acceptance import _turn_starts_from_labels, load_records
 
 STEP_REJECT = "reject"
 STEP_FULL_BONUS = "full_bonus"
@@ -441,24 +444,20 @@ class HFDraftProposer(_HFAdapter):
 # ---------------------------------------------------------------------------
 
 
-def load_records(path: str, limit: int | None = None) -> list[dict]:
-    """Frozen parquet or datasets save_to_disk dir, first N in frozen order."""
-    if str(path).endswith(".parquet"):
-        import pyarrow.parquet as pq
+def load_model(model_id: str, dtype, device: str = "auto"):
+    """HF model load with device placement ("auto" keeps from_pretrained's
+    default — CPU/MPS on the dev host; the GPU host passes cuda:0)."""
+    import transformers
 
-        rows = pq.read_table(path).to_pylist()
-    else:
-        from datasets import load_from_disk
-
-        rows = list(load_from_disk(path))
-    if limit is not None:
-        rows = rows[:limit]
-    if not rows:
-        raise SystemExit(f"no records in {path}")
-    return rows
+    model = transformers.AutoModelForCausalLM.from_pretrained(
+        model_id, torch_dtype=dtype
+    )
+    if device != "auto":
+        model = model.to(device)
+    return model
 
 
-def build_proposer(kind: str, draft_model: str | None, eos_id: int, dtype, ngram_min: int = 2, ngram_max: int = 5):
+def build_proposer(kind: str, draft_model: str | None, eos_id: int, dtype, ngram_min: int = 2, ngram_max: int = 5, device: str = "auto"):
     """Return the proposer instance. Draft proposers are stateful and
     reused across records (their cache syncs like the verifier's); n-gram
     proposers are cheap and built fresh per record by the caller."""
@@ -468,6 +467,8 @@ def build_proposer(kind: str, draft_model: str | None, eos_id: int, dtype, ngram
         model = transformers.AutoModelForCausalLM.from_pretrained(
             draft_model, torch_dtype=dtype
         )
+        if device != "auto":
+            model = model.to(device)
         return HFDraftProposer(model, eos_id)
     if kind == "ngram":
         from src.serving.proposers import NgramProposer
@@ -495,6 +496,9 @@ def main() -> None:
     ap.add_argument("--ngram-max", type=int, default=5)
     ap.add_argument("--dtype", default=None, help="e.g. float32 (local "
         "exactness) or bfloat16 (H100 measurement); default float32")
+    ap.add_argument("--device", default="auto",
+        help="model placement: cuda:0 on the GPU host; 'auto' keeps the "
+        "from_pretrained default (CPU/MPS) for the local §4.4 checks")
     ap.add_argument("--out", required=True, help="events JSONL")
     ap.add_argument("--outputs-out", default=None,
         help="per-turn generated ids JSONL (§4.4 exactness diff)")
@@ -504,17 +508,17 @@ def main() -> None:
     import torch
 
     dtype = getattr(torch, args.dtype) if args.dtype else torch.float32
-    import transformers
+    import transformers  # noqa: F401 — presence check, mirroring VLLMEngine
 
     eos_id = get_eos_id()
-    target = transformers.AutoModelForCausalLM.from_pretrained(
-        args.target_model, torch_dtype=dtype
-    )
+    target = load_model(args.target_model, dtype, args.device)
     verifier = HFVerifier(target)
 
     records = load_records(args.records, args.limit)
     if args.proposer == "draft":
-        proposer = build_proposer("draft", args.draft_model, eos_id, dtype)
+        proposer = build_proposer(
+            "draft", args.draft_model, eos_id, dtype, device=args.device
+        )
         factory = lambda: proposer
     else:
         factory = lambda: build_proposer(
@@ -557,6 +561,7 @@ def main() -> None:
             "max_new_tokens": args.max_new_tokens,
             "limit": args.limit,
             "dtype": args.dtype or "float32",
+            "device": args.device,
             "n_records": len(records),
             "n_events": len(all_events),
             "git_commit": subprocess.run(

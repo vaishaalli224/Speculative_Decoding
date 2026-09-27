@@ -18,7 +18,7 @@ TB_LIMIT="${TB_LIMIT:-100}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 METRICS="${METRICS:-results/metrics.jsonl}"
 K_VALUES="${K_VALUES:-3 5 7}"
-PY=".venv/bin/python"
+PY="${PY:-.venv-h100/bin/python}"
 
 echo "== k x temperature grid at batch 1, xLAM-eval (§4.5) =="
 for K in $K_VALUES; do

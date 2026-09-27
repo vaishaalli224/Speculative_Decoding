@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Baselines (plan §5, hours 1.5–3, P0): AR-only batch sweep, n-gram,
 # untuned drafts at k=5 greedy, exactness gate. Every run appends to
-# results/metrics.jsonl (B7); outputs land in results/vllm/.
+# results/metrics.jsonl (B7); outputs land in results/vllm/. Starts with
+# a 5-prompt smoke through each spec config so a rejected speculative_
+# config fails in minutes, not after the AR sweep.
 #
 # Usage: bash scripts/run_baselines.sh
-# Env overrides: MODEL, DRAFT05, DRAFT15, LIMIT, MAX_NEW_TOKENS, METRICS
+# Env overrides: MODEL, DRAFT05, DRAFT15, LIMIT, MAX_NEW_TOKENS, METRICS, PY
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -15,7 +17,18 @@ DRAFT15="${DRAFT15:-Qwen/Qwen2.5-Coder-1.5B-Instruct}"
 LIMIT="${LIMIT:-200}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 METRICS="${METRICS:-results/metrics.jsonl}"
-PY=".venv/bin/python"
+PY="${PY:-.venv-h100/bin/python}"
+
+echo "== smoke: 5 prompts through each spec config (fail fast, plan §1.5) =="
+$PY -m src.serving.bench_vllm frozen/xlam_eval.parquet --method draft_model \
+    --draft-model "$DRAFT05" --k 5 --model "$MODEL" --temperature greedy \
+    --batch 1 --runs 1 --limit 5 --max-new-tokens 64 --warmup 0 \
+    --metrics-out "" --outputs-out ""
+$PY -m src.serving.bench_vllm frozen/xlam_eval.parquet --method ngram \
+    --k 5 --model "$MODEL" --temperature greedy \
+    --batch 1 --runs 1 --limit 5 --max-new-tokens 64 --warmup 0 \
+    --metrics-out "" --outputs-out ""
+echo "  both spec configs accepted — proceeding to full baselines"
 
 echo "== AR-only baseline, batch 1/8/32 (§4.2) =="
 for B in 1 8 32; do

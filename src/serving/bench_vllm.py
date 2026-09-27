@@ -89,7 +89,7 @@ import time
 from pathlib import Path
 from typing import Protocol
 
-from src.serving.instrumented_spec import load_records
+from src.analysis.eval_acceptance import load_records
 from src.serving.spec_configs import build_spec_config
 
 DEFAULT_MAX_NEW_TOKENS = 512  # matches the instrumented loop's CLI default

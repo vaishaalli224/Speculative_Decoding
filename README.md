@@ -94,6 +94,15 @@ teacher-forced turn transitions.
     --out results/events/draft_k5.jsonl --outputs-out ... --meta-out ...
 ```
 
+`--device cuda:0` on the GPU host (default keeps CPU/MPS for the local
+§4.4 checks). The τ pipeline is scripted on the GPU day
+(`scripts/run_tau.sh`: both untuned drafts + n-gram → events + analyzer
+reports), and the §8.1 decision point is mechanical:
+`scripts/pick_draft.py` reads `results/metrics.jsonl` and prints the
+pre-registered draft-choice rule's verdict (higher untuned speedup at
+k=5 greedy batch 1; tie-break toward 0.5B) — golden-tested in
+`tests/test_pick_draft.py`.
+
 Local §4.4 sanity checks (CPU fp32, tiny models — run before the GPU day;
 auto-skip unless the 0.5B weights are cached or `SPEC_REALMODELS=1`):
 
@@ -121,8 +130,14 @@ own torch pin; the local venv stays on requirements.txt).
 
 ```bash
 # GPU day — everything through scripts/ (plan §5):
+bash scripts/setup_day0.sh             # hours 0–1.5: clone, venv+pins, raw data,
+                                        # freeze verify, model downloads, vLLM
+                                        # spec-config smoke test (both shapes)
 bash scripts/run_baselines.sh          # AR b1/8/32, n-gram, untuned drafts,
                                         # exactness gates (§4.4)
+bash scripts/run_tau.sh                # untuned τ: both drafts + n-gram through
+                                        # the instrumented loop + analyzer
+python scripts/pick_draft.py           # §8.1 decision point, mechanical
 bash scripts/run_sweep.sh <draft-path> [tag]   # k × T grid, batch sweep, TB-500
 # or one config directly:
 python -m src.serving.bench_vllm frozen/xlam_eval.parquet --method draft_model \
