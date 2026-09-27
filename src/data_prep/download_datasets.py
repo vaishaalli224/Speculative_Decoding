@@ -56,7 +56,11 @@ def download_xlam() -> dict:
 
 def main() -> None:
     if not os.environ.get("HF_TOKEN"):
-        raise SystemExit("HF_TOKEN not set — check the workspace .env")
+        # both datasets are public — anonymous download works; the token
+        # only lifts rate limits (and the GPU host won't have the local
+        # .env, so a hard gate here would stall day-0 setup)
+        print("WARNING: HF_TOKEN not set — downloading anonymously "
+              "(both repos are public; a token only helps rate limits)")
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
