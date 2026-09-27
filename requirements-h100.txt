@@ -1,0 +1,44 @@
+# Speculative_Decoding — H100 host environment (GPU day only)
+#
+# Everything in requirements.txt PLUS vLLM, for the bench harness's
+# VLLMEngine adapter (§6.6) and the wall-clock runs (§4.2). Install:
+#   pip install -r requirements-h100.txt
+#
+# Pins (verified against PyPI metadata 2026-09-27):
+#   vllm==0.30.0 — latest; draft-model speculative_config is supported
+#     (unsupported only in vllm<=0.10.0 per the vLLM docs; ngram likewise),
+#     Python >=3.10,<3.15, linux x86_64/aarch64 wheels.
+#   torch==2.13.0 — vLLM 0.30.0's own hard pin (torchaudio 2.11.0 /
+#     torchvision 0.28.0 follow it). NOTE: this is NOT the local dev venv's
+#     torch 2.14.0 — the two environments are intentionally separate.
+#   transformers==5.17.0 / tokenizers==0.23.2 / safetensors==0.8.0 /
+#     huggingface_hub==1.33.0 / numpy==2.5.3 / pyarrow==25.0.1 / pandas==3.0.6
+#     — kept at the local pins (all satisfy vLLM's floors: transformers>=5.10.4,
+#     tokenizers>=0.21.1, safetensors>=0.6.2, hub>=1.31.0); dataset render and
+#     the §4.4 real-model checks then behave identically on both hosts.
+#
+# vLLM pulls its own pinned dependency tree (flashinfer, xgrammar, numba,
+# etc.) — don't pin those here; `pip install vllm==0.30.0` resolves them.
+# Day-0 smoke test (plan §1.5): serve one prompt with a draft-model
+# speculative_config before trusting any number from this harness.
+
+datasets==5.0.1
+huggingface_hub==1.33.0
+python-dotenv==1.2.3
+transformers==5.17.0
+jinja2==3.1.6
+pytest==9.1.1
+torch==2.13.0
+
+vllm==0.30.0
+
+# --- shared transitive pins (same as requirements.txt) ---
+pyarrow==25.0.1
+pandas==3.0.6
+numpy==2.5.3
+fsspec==2026.6.0
+filelock==4.0.4
+requests==2.34.2
+tokenizers==0.23.2
+safetensors==0.8.0
+regex==2026.9.10

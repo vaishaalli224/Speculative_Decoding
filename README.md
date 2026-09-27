@@ -15,10 +15,10 @@ Speculative_Decoding/
 ├── data/                 # gitignored: raw/ (HF downloads) + processed/ (rendered splits)
 ├── src/
 │   ├── data_prep/        # download, xlam_prep, toolbench_clean, freeze_splits
-│   ├── serving/          # instrumented_spec (done), proposers; bench_vllm (upcoming)
+│   ├── serving/          # instrumented_spec + proposers + bench_vllm + spec_configs
 │   ├── training/         # (upcoming) kd_warmstart, onpolicy_gkd
-│   └── analysis/         # (upcoming) metrics, region_split, plots
-├── scripts/              # (upcoming) run_*.sh
+│   └── analysis/         # eval_acceptance (done); plots (upcoming)
+├── scripts/              # run_baselines.sh, run_sweep.sh (GPU day; more upcoming)
 ├── results/               # metrics.jsonl + tables/plots (committed)
 └── tests/                # golden render/clean/freeze tests
 ```
@@ -104,6 +104,42 @@ SPEC_REALMODELS=1 .venv/bin/python -m pytest tests/test_spec_realmodels.py
 #           (non-Coder 0.5B draft forces real rejections → crop path exercised)
 ```
 
+## vLLM bench harness (plan.md §6.6 — done)
+
+`src/serving/bench_vllm.py` is the wall-clock instrument (§4.2): given
+(model, spec config, prompts, params) → tokens/sec + outputs, plus an
+exactness mode that compares full token-id sequences of speculative vs.
+non-speculative greedy decoding (§4.4). Same layering as the loop: a
+vLLM-free/torch-free core — chunked batch semantics, timed sweeps with
+medians, outputs/metrics IO, the exactness comparator — golden-tested
+locally (39 tests), and a thin `VLLMEngine` adapter that imports vLLM
+only on the H100. `src/serving/spec_configs.py` pins the plan's two
+`speculative_config` shapes verbatim (draft-model and n-gram) with
+validation; sampling params never live in the engine config. GPU host
+installs `requirements-h100.txt` (vllm==0.30.0, torch==2.13.0 — vLLM's
+own torch pin; the local venv stays on requirements.txt).
+
+```bash
+# GPU day — everything through scripts/ (plan §5):
+bash scripts/run_baselines.sh          # AR b1/8/32, n-gram, untuned drafts,
+                                        # exactness gates (§4.4)
+bash scripts/run_sweep.sh <draft-path> [tag]   # k × T grid, batch sweep, TB-500
+# or one config directly:
+python -m src.serving.bench_vllm frozen/xlam_eval.parquet --method draft_model \
+    --draft-model <draft> --k 5 --temperature greedy --batch 1 --runs 3 \
+    --limit 200 --outputs-out results/vllm/draft_k5.jsonl
+python -m src.serving.bench_vllm frozen/xlam_eval.parquet --exactness \
+    --method draft_model --draft-model <draft> --k 5 --limit 50 \
+    --exactness-out results/exactness/draft_k5.json   # exit 1 on mismatch
+```
+
+`--per-turn` expands TB-500 records to teacher-forced per-assistant-turn
+prompts (the loop's C6 protocol; turn starts imported from the analyzer,
+so the two instruments cannot desync) — the transfer wall-clock then
+measures the same agentic states the acceptance analysis scores. Every
+run appends one JSON line to `results/metrics.jsonl`; the report stage
+reads only that file.
+
 `frozen/` is the GPU-day entry point (plan.md §6.3): xLAM-500 + TB-500 eval
 parquets, the Stage-1 (5k seeded xLAM sample) / Stage-2 (45k TB prefixes +
 52.8k xLAM pool) context index files, and a sha256 manifest that also
@@ -131,7 +167,7 @@ re-checks every checksum and the held-out disjointness properties from
 
 ## Testing
 
-93 tests: golden template/region facts, the instrumented loop's C1–C7 convention/multi-turn/n-gram golden cases, xLAM conversion, ToolBench cleaning
+132 tests: golden template/region facts, the instrumented loop's C1–C7 convention/multi-turn/n-gram golden cases, xLAM conversion, ToolBench cleaning
 (columnar conversations, `Action Input:` variants, JSON `true/false`
 payloads, retry-draft blocks, truncated envelopes, retry user turns, Finish
 conversion), freeze tamper-detection, and acceptance-metrics golden cases
@@ -140,4 +176,9 @@ bootstrap CIs, the §4.4 self-consistency event shape). The instrumented
 loop adds 27 torch-free golden tests (event conventions C1–C7, budget
 capping, teacher-forced turn transitions, n-gram proposer + PAD fallback)
 and 3 real-model §4.4 tests (self-consistency: draft=target ⇒ α=1.0, τ=k;
-exactness: loop output == plain greedy generate(), token-identical).
+exactness: loop output == plain greedy generate(), token-identical). The
+bench harness adds 39 vLLM-free golden tests (B1–B7: chunked batching,
+warmup exclusion, wall/rate medians, gen-vs-prompt token split, run-1
+outputs, exactness verdicts with first-divergence, per-turn TB-500
+expansion against the analyzer's own turn-start helper, spec-config
+shapes and validation).

@@ -1,10 +1,13 @@
 # Speculative_Decoding — pinned environment
 # Data prep (§6.2/6.3) + the instrumented loop's local §4.4 checks (§6.5).
-# vLLM (§6.6) and training (TRL, §6.7) libs will be added when those stages
-# start; the H100 host must `pip install -r requirements.txt` from this file
-# and get the identical environment. NOTE: when vLLM lands it will bring its
-# own torch pin — expect a re-pin here and re-run the §4.4 checks on the
-# H100 host as GPU-day step 0.
+# The bench harness's pure core (§6.6) is vLLM-free and torch-free — it is
+# golden-tested locally; only the thin VLLMEngine adapter needs the H100.
+#
+# !!! GPU host: install requirements-h100.txt instead (vLLM 0.30.0 brings
+# its own torch pin — torch==2.13.0 — see that file). Installing vLLM in
+# this local venv would break the MPS/CPU real-model tests; keep them
+# separate. Re-run the §4.4 real-model checks on the H100 host as
+# GPU-day step 0 after installing requirements-h100.txt.
 
 datasets==5.0.1
 huggingface_hub==1.33.0
