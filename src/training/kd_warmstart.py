@@ -252,6 +252,11 @@ def kd_row_losses(
             f"student vocab {V} < real vocab {real_vocab} — the draft cannot "
             "have a smaller vocab than the tokenizer (K1)"
         )
+    if int(labels.max()) >= real_vocab or int(labels.min()) < 0:
+        raise AssertionError(  # same K1 logic, token side: the CE anchor
+            # target must live in the real vocab too
+            "label token outside real vocab — bad KD data (K1)"
+        )
     if bool(row_valid.any()) and int(teacher_ids[row_valid].max()) >= real_vocab:
         # The target's own top-k must live in the real vocab. A padding id
         # here would mean the data pipeline stored ids the tokenizer can't

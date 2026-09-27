@@ -312,7 +312,7 @@ def validate_generation(text: str, tools: list[dict], tags) -> dict:
                     f"{name}: keys outside schema: {sorted(keys - allowed)}")
             missing = required - keys
             if missing:
-                problems.append(f"{name}: missing required: {sorted(missing)}")
+                problems.append(f"missing required keys for {name!r}: {sorted(missing)}")
     return {"valid": not problems, "n_calls": len(payloads), "problems": problems}
 
 
