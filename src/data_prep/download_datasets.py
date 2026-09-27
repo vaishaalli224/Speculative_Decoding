@@ -16,9 +16,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load the workspace .env (repo root's parent) so HF_TOKEN is available.
+# Load HF_TOKEN: prefer the repo's own .env (the GPU host gets a copy
+# via scp — data/ and .env are both gitignored), fall back to the local
+# dev layout where .env lives in the workspace parent. override=True so
+# an explicitly exported var always wins.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(_REPO_ROOT.parent / ".env")
+load_dotenv(_REPO_ROOT / ".env", override=True)
+load_dotenv(_REPO_ROOT.parent / ".env", override=True)
 
 from datasets import DatasetDict, load_dataset  # noqa: E402  (needs env loaded first)
 
