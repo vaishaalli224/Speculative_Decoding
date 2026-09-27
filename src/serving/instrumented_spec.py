@@ -72,6 +72,7 @@ invalidates it is detected and repaired with a single-token re-forward.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -162,10 +163,21 @@ def run_rounds(
     query_id,
     turn: int | None = None,
     max_steps: int | None = None,
+    time_fn=time.perf_counter,
 ) -> LoopResult:
     """Round loop for one assistant turn; adapters must already be
     aligned to the turn's context. Every round emits >= 1 token, so the
-    budget alone terminates the loop; `max_steps` is a safety cap."""
+    budget alone terminates the loop; `max_steps` is a safety cap.
+
+    C8 (per-step phase timing, golden-tested): every event carries
+    propose_ms and verify_ms — wall time of proposer.propose() and
+    verifier.predict() respectively (sync/crop time is amortized
+    bookkeeping and stays untracked). This is the only per-phase timing
+    in the project: vLLM cannot expose draft-vs-verify cost, so the
+    "is the draft the bottleneck at large k" question (it runs k
+    sequential forwards per one verify pass) is answered here. A fake
+    time_fn keeps the core torch-free and the convention testable.
+    """
     if k < 1:
         raise ValueError("k must be >= 1")
     events: list[dict] = []
@@ -176,12 +188,15 @@ def run_rounds(
             break
         budget_left = max_new_tokens - len(output)
         cap = min(k, budget_left)  # C4 caps the proposal first
+        t0 = time_fn()
         proposal = proposer.propose(cap)
+        t1 = time_fn()
         if not 1 <= len(proposal) <= cap:
             raise AssertionError(
                 f"proposer returned {len(proposal)} tokens, contract is 1..{cap}"
             )
         preds = verifier.predict(proposal)
+        t2 = time_fn()
         mask, correction, stype, eos = verify_round(
             proposal, preds, budget_left, eos_id
         )
@@ -205,6 +220,9 @@ def run_rounds(
             "correction_token": correction,
             "eos": bool(eos),
             "step_type": stype,
+            # C8 phase timing (ms; from the loop's time_fn)
+            "propose_ms": 1000.0 * (t1 - t0),
+            "verify_ms": 1000.0 * (t2 - t1),
         }
         if turn is not None:
             event["turn"] = turn
@@ -230,13 +248,14 @@ def generate_turn(
     query_id,
     turn: int | None = None,
     max_steps: int | None = None,
+    time_fn=time.perf_counter,
 ) -> LoopResult:
     """Reset both sides to `prompt`, then run_rounds (single-turn path)."""
     proposer.reset(list(prompt))
     verifier.reset(list(prompt))
     return run_rounds(
         proposer, verifier, len(prompt), eos_id, k, max_new_tokens,
-        query_id, turn, max_steps,
+        query_id, turn, max_steps, time_fn,
     )
 
 
@@ -248,6 +267,7 @@ def generate_record(
     k: int,
     max_new_tokens: int,
     max_steps: int | None = None,
+    time_fn=time.perf_counter,
 ) -> tuple[list[dict], list[dict]]:
     """Generate every assistant turn of a rendered record (C6).
 
@@ -275,7 +295,7 @@ def generate_record(
             verifier.sync(prev_start, ids[prev_start:s])
         res = run_rounds(
             proposer, verifier, s, eos_id, k, max_new_tokens,
-            record["query_id"], t if multi else None, max_steps,
+            record["query_id"], t if multi else None, max_steps, time_fn,
         )
         events.extend(res.events)
         outputs.append({

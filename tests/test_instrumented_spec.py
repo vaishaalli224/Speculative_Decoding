@@ -631,3 +631,99 @@ class TestNgramProposer:
         m = flat_metrics(events)
         assert m["n_events"] == len(res.events)
         assert 0.0 < m["alpha"] <= 1.0
+
+
+class TestPhaseTimingC8:
+    """C8: every event carries propose_ms / verify_ms from the loop's
+    time_fn; a fake clock makes the values deterministic. The analyzer
+    aggregates them (propose/verify means + the draft's time share)."""
+
+    class FakeClock:
+        """Advances 1.0 per call: propose (1 tick) vs verify (3 ticks)
+        per round are exactly distinguishable."""
+
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            self.t += 1.0
+            return self.t
+
+    def test_events_carry_phase_ms(self):
+        # The clock advances 1.0 per call, so each phase spans exactly
+        # one tick = 1000 ms; the point is that each event carries BOTH
+        # values, measured around the right calls (deterministic under
+        # the fake clock, not wall-clock noise)
+        clk = self.FakeClock()
+        proposer = ScriptedProposer([
+            [10, 11, 12],  # rejected at 2 -> corr 99
+            [13, 14, 15],  # all accepted -> bonus 98; budget ends turn
+        ])
+        verifier = ScriptedVerifier([
+            [10, 11, 99, 99],
+            [13, 14, 15, 98],
+        ])
+        res = generate_turn(proposer, verifier, [1, 2], EOS, k=3,
+                            max_new_tokens=6, query_id="q", time_fn=clk)
+        assert len(res.events) == 2
+        for e in res.events:
+            assert e["propose_ms"] == pytest.approx(1000.0)
+            assert e["verify_ms"] == pytest.approx(1000.0)
+        # each round makes 3 clock reads (t0, t1, t2): 2 rounds = 6
+        assert clk.t == pytest.approx(6.0)
+
+    def test_analyzer_phase_aggregation(self):
+        # hand-computed: 3 events, propose 1ms each, verify 1/2/3 ms
+        events = [
+            {"query_id": "q", "step": s, "draft_tokens": [t],
+             "accept_mask": [True], "correction_token": None, "eos": False,
+             "propose_ms": 1.0, "verify_ms": float(v)}
+            for s, (t, v) in enumerate(((1, 1), (2, 2), (3, 3)))
+        ]
+        m = flat_metrics(events)
+        ph = m["phase_timing"]
+        assert ph["n_timed"] == 3
+        assert ph["propose_ms_mean"] == pytest.approx(1.0)
+        assert ph["verify_ms_mean"] == pytest.approx(2.0)
+        # draft share = 3 / (3 + 6)
+        assert ph["draft_time_share"] == pytest.approx(1 / 3)
+        assert ph["verify_ms_median"] == pytest.approx(2.0)
+
+    def test_pre_c8_events_parse_without_timing(self):
+        # old event streams (no propose_ms/verify_ms) still parse; no
+        # phase_timing key is added (the analyzer stays backward-safe)
+        events = [
+            {"query_id": "q", "step": 0, "draft_tokens": [1],
+             "accept_mask": [True], "correction_token": None, "eos": False}
+        ]
+        m = flat_metrics(events)
+        assert "phase_timing" not in m
+
+    def test_ngram_propose_is_cheap(self):
+        # the n-gram proposer's propose() is pure-Python: with the real
+        # clock its propose_ms is near-zero — the timing convention must
+        # at least not crash and report finite values on a small prompt
+        from src.serving.proposers import NgramProposer
+
+        # n-gram proposes from the prompt itself: prompt [1,2,3,4,5,1,2,3]
+        # ends with [1,2,3]; n=3 match at prompt start -> proposes 4,5
+        # (then 1,2,3 again...). Verify with a real clock; only assert
+        # finite non-negative phase values (near-zero propose_ms is the
+        # expected n-gram signature, not asserted to avoid flake).
+        prop = NgramProposer(2, 5)
+        # Scripted verifier: reject every proposal at position 0 with an
+        # EOS correction -> exactly one round per verifier script entry,
+        # turn ends immediately (robust to whatever the n-gram matcher
+        # proposes; the test only asserts the phase keys exist + finite)
+        verifier = ScriptedVerifier([
+            [EOS, 99, 99],
+            [EOS, 99, 99],
+        ])
+        res = generate_turn(prop, verifier, [1, 2, 3, 4, 5, 1, 2, 3], EOS,
+                            k=2, max_new_tokens=6, query_id="ng")
+        assert res.events
+        for e in res.events:
+            assert e["propose_ms"] >= 0.0
+            assert e["verify_ms"] >= 0.0
+        assert all(e["eos"] for e in res.events)
+

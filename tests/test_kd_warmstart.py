@@ -14,8 +14,6 @@ tests/test_kd_warmstart_realmodels.py.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from src.training.kd_warmstart import (
@@ -181,17 +179,18 @@ class TestLossMath:
         assert abs(loss) < 1e-5
 
     def test_ce_only_when_no_teacher(self):
-        # K2 fallback: row_valid False -> plain CE
+        # K2 fallback: row_valid False -> plain CE, computed by hand: with
+        # logits 0 everywhere except +5 on id 42, p(42) = e^5/(e^5 + 89)
         t = self.torch
         V, REAL = 100, 90
         s = t.zeros(V)
         s[42] = 5.0
-        label = 42
-        ce_expected = -t.log(t.tensor(1.0))  # softmax puts ~1 on 42
+        p42 = t.exp(t.tensor(5.0)) / (t.exp(t.tensor(5.0)) + (REAL - 1))
+        ce_expected = -t.log(p42)
         loss = self._row(s.tolist(), [0, 0],
                          [float("-inf"), float("-inf")],
-                         False, label, REAL, w=0.0)
-        assert loss == pytest.approx(ce_expected, abs=1e-4)
+                         False, 42, REAL, w=0.0)
+        assert loss == pytest.approx(float(ce_expected), rel=1e-4)
 
     def test_sft_weight_mixes_kl_and_ce(self):
         # w=1 -> pure CE on the teacher's argmax (first stored row entry,
@@ -226,7 +225,7 @@ class TestLossMath:
         s = t.zeros(100)
         with pytest.raises(AssertionError, match="padding id"):
             kd_row_losses(
-                t.tensor([s]), t.tensor([[95, 7]]),
+                s.unsqueeze(0), t.tensor([[95, 7]]),
                 t.tensor([[-0.1, -1.0]]), t.tensor([True]),
                 t.tensor([3]), 90, sft_weight=0.1,
             )
@@ -236,7 +235,7 @@ class TestLossMath:
         s = t.zeros(100)
         with pytest.raises(AssertionError, match="label"):
             kd_row_losses(
-                t.tensor([s]), t.tensor([[3, 7]]),
+                s.unsqueeze(0), t.tensor([[3, 7]]),
                 t.tensor([[-0.1, -1.0]]), t.tensor([True]),
                 t.tensor([95]), 90, sft_weight=0.1,
             )

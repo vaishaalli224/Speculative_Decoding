@@ -228,6 +228,23 @@ def flat_metrics(events: list[dict], k_max: int | None = None) -> dict:
         pos_accepted = pos_accepted[:k_max]
 
     alpha_n = [a / v if v else None for a, v in zip(pos_accepted, pos_scored)]
+    # C8 phase timing (optional keys; pre-C8 event streams parse unchanged):
+    # mean/median per-step draft (propose) and verify time in ms, and the
+    # draft's share of loop time — the "is the draft the bottleneck at
+    # large k" number (the draft runs k sequential forwards per verify).
+    phase: dict = {}
+    p_ms = [e["propose_ms"] for e in events if e.get("propose_ms") is not None]
+    v_ms = [e["verify_ms"] for e in events if e.get("verify_ms") is not None]
+    if p_ms and v_ms and len(p_ms) == len(v_ms):
+        tp, tv = sum(p_ms), sum(v_ms)
+        phase = {
+            "n_timed": len(p_ms),
+            "propose_ms_mean": float(np.mean(p_ms)),
+            "propose_ms_median": float(np.median(p_ms)),
+            "verify_ms_mean": float(np.mean(v_ms)),
+            "verify_ms_median": float(np.median(v_ms)),
+            "draft_time_share": tp / (tp + tv) if tp + tv else None,
+        }
     return {
         "n_events": n_events,
         "n_prompts": len({e["query_id"] for e in events}),
@@ -238,6 +255,7 @@ def flat_metrics(events: list[dict], k_max: int | None = None) -> dict:
         "pos_scored": pos_scored,
         "pos_accepted": pos_accepted,
         "tokens_emitted": int(sum(s["emitted"] for s in per_event)),
+        **({"phase_timing": phase} if phase else {}),
     }
 
 
