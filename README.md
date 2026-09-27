@@ -97,11 +97,9 @@ teacher-forced turn transitions.
 `--device cuda:0` on the GPU host (default keeps CPU/MPS for the local
 §4.4 checks). The τ pipeline is scripted on the GPU day
 (`scripts/run_tau.sh`: both untuned drafts + n-gram → events + analyzer
-reports), and the §8.1 decision point is mechanical:
-`scripts/pick_draft.py` reads `results/metrics.jsonl` and prints the
-pre-registered draft-choice rule's verdict (higher untuned speedup at
-k=5 greedy batch 1; tie-break toward 0.5B) — golden-tested in
-`tests/test_pick_draft.py`.
+reports). The draft is fixed to Coder-0.5B (§8.1); `scripts/pick_draft.py`
+is retired from the runbook (kept as a results-summary utility, with its
+golden tests).
 
 Local §4.4 sanity checks (CPU fp32, tiny models — run before the GPU day;
 auto-skip unless the 0.5B weights are cached or `SPEC_REALMODELS=1`):

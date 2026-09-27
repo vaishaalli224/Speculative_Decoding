@@ -94,7 +94,6 @@ from huggingface_hub import snapshot_download
 for repo in (
     "Qwen/Qwen2.5-Coder-14B-Instruct",
     "Qwen/Qwen2.5-Coder-0.5B-Instruct",
-    "Qwen/Qwen2.5-Coder-1.5B-Instruct",
 ):
     p = snapshot_download(repo)
     n = sum(1 for f in os.scandir(p) if f.is_file())
@@ -103,11 +102,11 @@ EOF
 
 echo "== [4b/5] draft embedding padding (vLLM requires equal vocab_size) =="
 # vLLM 0.30.0 SpeculativeConfig hard-rejects draft/target pairs whose
-# config.vocab_size differ (152,064 target vs 151,936 drafts — caught by
-# this script's own smoke test on the rental, 2026-09-27). Pad each
+# config.vocab_size differ (152,064 target vs 151,936 draft — caught by
+# this script's own smoke test on the rental, 2026-09-27). Pad the
 # draft's embedding to the target's vocab with zero rows; prepare_draft
 # gates on greedy parity before saving (src/serving/prepare_draft.py).
-for D in 0.5B 1.5B; do
+for D in 0.5B; do
   SRC="Qwen/Qwen2.5-Coder-${D}-Instruct"
   OUT="drafts/coder-${D,,}-padded"
   "$VENV_DIR/bin/python" -m src.serving.prepare_draft \

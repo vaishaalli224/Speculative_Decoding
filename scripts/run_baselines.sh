@@ -6,14 +6,13 @@
 # config fails in minutes, not after the AR sweep.
 #
 # Usage: bash scripts/run_baselines.sh
-# Env overrides: MODEL, DRAFT05, DRAFT15, LIMIT, MAX_NEW_TOKENS, METRICS, PY
+# Env overrides: MODEL, DRAFT (0.5B path), LIMIT, MAX_NEW_TOKENS, METRICS, PY
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODEL="${MODEL:-Qwen/Qwen2.5-Coder-14B-Instruct}"
 DRAFT05="${DRAFT05:-drafts/coder-0.5b-padded}"
-DRAFT15="${DRAFT15:-drafts/coder-1.5b-padded}"
 LIMIT="${LIMIT:-200}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 METRICS="${METRICS:-results/metrics.jsonl}"
@@ -46,8 +45,8 @@ $PY -m src.serving.bench_vllm frozen/xlam_eval.parquet --method ngram \
     --outputs-out results/vllm/ngram_k5_greedy_b1.jsonl \
     --metrics-out "$METRICS"
 
-echo "== untuned drafts, k=5 greedy, batch 1 (§8 draft-choice rule) =="
-for D in "$DRAFT05" "$DRAFT15"; do
+echo "== untuned draft (0.5B, fixed per §8.1), k=5 greedy, batch 1 =="
+for D in "$DRAFT05"; do
   $PY -m src.serving.bench_vllm frozen/xlam_eval.parquet --method draft_model \
       --draft-model "$D" --k 5 --model "$MODEL" --temperature greedy \
       --batch 1 --runs 3 --limit "$LIMIT" --max-new-tokens "$MAX_NEW_TOKENS" \

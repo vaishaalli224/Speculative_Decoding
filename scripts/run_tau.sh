@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Untuned-τ runs (plan §5 hours 1.5–3, §4.1): the instrumented HF loop on a
-# 100-prompt xLAM-500 subset for both draft candidates + the n-gram proposer
-# — acceptance internals (α, τ, per-position, region splits) for the §8.1
-# decision point and the untuned row of the stage-wise table. Wall-clock
-# always comes from vLLM (run_baselines.sh); this script is the instrument.
+# 100-prompt xLAM-500 subset for the fixed 0.5B draft (§8.1) + the n-gram
+# proposer — acceptance internals (α, τ, per-position, region splits) for
+# the untuned row of the stage-wise table. Wall-clock always comes from
+# vLLM (run_baselines.sh); this script is the instrument.
 #
 # Usage: bash scripts/run_tau.sh
-# Env overrides: PY, TARGET, DRAFT05, DRAFT15, LIMIT, K, DEVICE, OUTDIR
+# Env overrides: PY, TARGET, DRAFT05, LIMIT, K, DEVICE, OUTDIR
 #
 # After this script: the analyzer (eval_acceptance.py) turns each events
-# file into the §4.1–4.3 report — scripts/pick_draft.py reads exactly those.
+# file into the §4.1–4.3 report (the untuned baseline row).
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,7 +17,6 @@ cd "$(dirname "$0")/.."
 PY="${PY:-.venv-h100/bin/python}"
 TARGET="${TARGET:-Qwen/Qwen2.5-Coder-14B-Instruct}"
 DRAFT05="${DRAFT05:-drafts/coder-0.5b-padded}"
-DRAFT15="${DRAFT15:-drafts/coder-1.5b-padded}"
 LIMIT="${LIMIT:-100}"
 K="${K:-5}"
 DEVICE="${DEVICE:-cuda:0}"
@@ -43,8 +42,7 @@ run_one() {  # run_one <tag> <proposer> [draft-model]
 }
 
 run_one draft05 draft "$DRAFT05"
-run_one draft15 draft "$DRAFT15"
 run_one ngram ngram
 
-echo "τ runs done — reports in $OUTDIR/*_report.json"
-echo "decision point (plan §8.1): python scripts/pick_draft.py"
+echo "τ runs done — reports in $OUTDIR/*_report.json (untuned 0.5B baseline row)"
+echo "next (§5): bash scripts/run_stage1_datagen.sh"
