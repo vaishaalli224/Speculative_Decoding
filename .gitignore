@@ -20,3 +20,7 @@ __pycache__/
 
 # Padded draft artifacts (setup_day0 step 4b; regenerated on host)
 drafts/
+
+# Run artifacts (host-side): auto-logs + training checkpoints
+logs/
+checkpoints/

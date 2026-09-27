@@ -14,11 +14,14 @@ Speculative_Decoding/
 ├── frozen/               # COMMITTED: eval parquets + context indices + sha256 manifest
 ├── data/                 # gitignored: raw/ (HF downloads) + processed/ (rendered splits)
 ├── src/
-│   ├── data_prep/        # download, xlam_prep, toolbench_clean, freeze_splits
+│   ├── data_prep/        # download, xlam_prep, toolbench_clean, freeze_splits,
+│   │                     # build_distill_data (Stage-1 KD dataset)
 │   ├── serving/          # instrumented_spec + proposers + bench_vllm + spec_configs
+│   │                     # + gen_stage1 (Stage-1 target generation)
 │   ├── training/         # (upcoming) kd_warmstart, onpolicy_gkd
 │   └── analysis/         # eval_acceptance (done); plots (upcoming)
-├── scripts/              # run_baselines.sh, run_sweep.sh (GPU day; more upcoming)
+├── scripts/              # run_baselines.sh, run_sweep.sh, run_tau.sh, setup_day0.sh,
+│                         # run_stage1_datagen.sh (GPU day; more upcoming)
 ├── results/               # metrics.jsonl + tables/plots (committed)
 └── tests/                # golden render/clean/freeze tests
 ```
@@ -165,6 +168,34 @@ checksums the raw arrow files. **GPU-day step 0**:
 re-checks every checksum and the held-out disjointness properties from
 `frozen/` alone — it re-derives nothing.
 
+## Stage-1 KD data generation (plan.md §6.7 first half — done)
+
+`src/serving/gen_stage1.py` generates the frozen target's greedy
+continuations on the 5,000 frozen Stage-1 xLAM contexts with top-20
+logprobs per generated token (the teacher distributions for the KD
+warm-start); `src/data_prep/build_distill_data.py` validates every tool
+call against its own schema (plan §9 mitigation — drop rate logged,
+never repaired) and assembles the KD dataset with the repo's universal
+record schema plus `gen_logprob_token_ids/values`. Same layering as the
+bench: vLLM-free/torch-free core golden-tested locally, thin `VLLMGenEngine`
+(H100 only) and `HFGenEngine` (local dry runs) adapters. Conventions
+E1–E5 / G1–G7 pinned in the two module docstrings; the committed artifact
+is the generation JSONL (the assembled dataset is derived and gitignored).
+
+```bash
+# local sanity (no GPU): render + inspect the first 20 Stage-1 prompts
+.venv/bin/python -m src.data_prep.build_distill_data prompts --limit 20
+
+# GPU day (runbook hours 3.5–4.5): smoke → full 5k generation → assemble
+bash scripts/run_stage1_datagen.sh
+# or directly:
+python -m src.serving.gen_stage1 --engine vllm \
+    --model Qwen/Qwen2.5-Coder-14B-Instruct --logprobs 20 \
+    --out results/stage1/stage1_target_gen.jsonl
+python -m src.data_prep.build_distill_data assemble \
+    results/stage1/stage1_target_gen.jsonl --out data/processed/stage1_kd
+```
+
 ## Datasets (roles flipped 2026-09-26, plan.md §8.0)
 
 - **xLAM** (in-domain train + eval): 57,794-example training pool (96.3% of
@@ -180,7 +211,7 @@ re-checks every checksum and the held-out disjointness properties from
 
 ## Testing
 
-132 tests: golden template/region facts, the instrumented loop's C1–C7 convention/multi-turn/n-gram golden cases, xLAM conversion, ToolBench cleaning
+191 tests (torch-free suite): golden template/region facts, the instrumented loop's C1–C7 convention/multi-turn/n-gram golden cases, xLAM conversion, ToolBench cleaning
 (columnar conversations, `Action Input:` variants, JSON `true/false`
 payloads, retry-draft blocks, truncated envelopes, retry user turns, Finish
 conversion), freeze tamper-detection, and acceptance-metrics golden cases
@@ -194,4 +225,9 @@ bench harness adds 39 vLLM-free golden tests (B1–B7: chunked batching,
 warmup exclusion, wall/rate medians, gen-vs-prompt token split, run-1
 outputs, exactness verdicts with first-divergence, per-turn TB-500
 expansion against the analyzer's own turn-start helper, spec-config
-shapes and validation).
+shapes and validation). The Stage-1 data path adds 43 golden + 3
+real-model tests (E1–E5 EOS normalization + logprob fidelity + frozen
+order; G1–G7 payload spans, schema-validation matrix, drop accounting,
+record/regions/logprob parallelism, real frozen-index prompts == rendered
+train-pool slices; HFGenEngine end-to-end with the cached Coder-0.5B
+stand-in — which empirically corrected the EOS-inclusion assumption).

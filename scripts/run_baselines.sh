@@ -11,6 +11,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# --- auto-log: every invocation writes its own log ------------------------
+# logs/<script>_<UTC-timestamp>_<pid>.log + logs/latest.log symlink, so
+# progress is always `tail -f logs/latest.log` away. Composes safely with
+# an outer `nohup ... > file 2>&1` (tee preserves that copy too).
+LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/$(basename "${0%.sh}")_$(date -u +%Y%m%d-%H%M%S)_$$.log"
+ln -sfn "$(basename "$LOG_FILE")" "$LOG_DIR/latest.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
 MODEL="${MODEL:-Qwen/Qwen2.5-Coder-14B-Instruct}"
 DRAFT05="${DRAFT05:-drafts/coder-0.5b-padded}"
 LIMIT="${LIMIT:-200}"
