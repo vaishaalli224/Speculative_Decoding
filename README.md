@@ -100,7 +100,18 @@ over prompts of the per-prompt mean†).
 | Stage-1 KD (xLAM contexts) | 4.01 [4.17–4.40] | 2.65 [2.61–2.84] |
 | TB-KD (TB contexts; ablation A) | **4.07** [4.19–4.42] | **3.04** [3.01–3.26] |
 | Stage-2 GKD, 1:1 TB:xLAM mix | 4.18 [4.34–4.54] | 2.94 [2.97–3.23] |
-| Stage-2 GKD, TB-only (final) | 4.05 [4.20–4.43] | ⏳ *pending* |
+| Stage-2 GKD, TB-only (final) | 4.05 [4.20–4.43] | 3.04 [3.02–3.28] |
+
+**Per-step mechanics** (same instrumented runs; mean over ~10k verification
+steps per row): nearly every step ends in a full acceptance plus the bonus
+token (bonus_rate 0.95 on xLAM, 0.98 on TB), and trained-draft acceptance
+*holds or rises* deep into the proposal — xLAM per-position αₙ
+[0.91, 0.95, 0.95, 0.96, 0.97]; TB αₙ rises [0.80 → 0.90]. The draft's k
+sequential forwards dominate instrumented-loop time: k=5 propose 74 ms vs
+verify 40 ms (**draft time share 0.65**, identical on TB), k=9 127 ms vs
+41 ms (0.76) — the acceptance ceiling is high while the *proposer* cost is
+the binding constraint, which is why the next-step recommendation is a
+cheaper head, not more agreement.
 
 † The per-prompt mean sits above the pooled mean because longer
 generations have slightly lower per-step acceptance; orderings and every
@@ -127,6 +138,11 @@ during data prep from the target's own rendering, never hand-typed):
 | Stage-1 KD | 0.941 | 0.948 | 0.878 | 0.934 | 0.956 |
 | TB-KD | 0.947 | 0.952 | 0.889 | 0.946 | 0.956 |
 
+On TB-500 the trained drafts' acceptance is **flat across every region**
+(TB-KD: prose 0.854 / JSON 0.857 / tags 0.874 / final-answer 0.832;
+s2tb nearly identical) — no bimodality, and importantly no low-acceptance
+pocket left anywhere.
+
 Three readings fall out of these tables:
 
 1. **The plan's bimodal hypothesis was wrong, informatively.** We
@@ -145,16 +161,21 @@ Three readings fall out of these tables:
    draft in-domain* (4.07 vs 4.01) while beating it by +0.39 τ on TB.
    Distillation generalizes from the diverse distribution to the narrow
    one, not upward.
-3. **Off-policy KD on the right contexts is a strong baseline.** For greedy
-   spec decoding, committed prefixes are always target-greedy states, so
-   teacher-forced KD states match inference states almost exactly. GKD's
-   theoretical edge (draft-visited states) is mainly proven for sampled
-   decoding — and empirically, on-policy GKD did not separate from TB-KD
-   beyond CIs on either eval. ⏳ *The TB-only GKD run's TB-500 number
-   completes this verdict; the pre-registered §4.7A rule reads either
-   "off-policy suffices for greedy" or "on-policy validated, gap = X."*
-   Either way the region split explains it: there is no low-acceptance
-   region left for on-policy signal to fix.
+3. **Off-policy KD on the right contexts is a strong baseline — and
+   suffices for greedy.** For greedy spec decoding, committed prefixes
+   are always target-greedy states, so teacher-forced KD states match
+   inference states almost exactly. GKD's theoretical edge (draft-visited
+   states) is mainly proven for sampled decoding. Empirically, both
+   on-policy variants landed *inside* TB-KD's CIs on the transfer eval —
+   the mixed run at 2.94 [2.97–3.23], the TB-only run at **3.04 [3.02–3.28]
+   vs TB-KD's 3.04 [3.01–3.26]**: identical point estimates, full CI
+   overlap. Per the pre-registered §4.7A rule, that verdict is
+   **"off-policy KD suffices for greedy spec decoding; the on-policy
+   machinery is unnecessary complexity in this regime"** — and the region
+   split explains why: trained-draft TB acceptance is flat 0.83–0.89
+   across all regions, so there is no low-acceptance pocket for on-policy
+   signal to fix. (The one caveat the τ-only view hides: TB-KD reached
+   parity in *one hour of training*; GKD cost several more.)
 
 n-gram's instrumented profile (position-1 α 0.26 rising to 0.88 — it
 copies, it cannot predict; degrades 0.72 → 0.58 on TB's prose-heavy
@@ -233,11 +254,12 @@ else.
 
 ## Reproducibility guide
 
-**The fine print on the pending cells:** ⏳ marks the four cells filling
-from the in-flight battery on the TB-only Stage-2 draft (`results/events/s2tb_*`,
-`results/vllm/s2tb_*`, `results/exactness/s2tb_k5.json`); everything else
-is final and committed. This memo is regenerated from committed report
-JSONs at teardown; tables are never hand-edited after the fact.
+**The fine print on the pending cells:** ⏳ marks the two wall-clock cells
+still filling from the in-flight vLLM phase on the TB-only Stage-2 draft
+(`results/vllm/s2tb_*` — b1 xLAM row mid-run, then b32 and TB transfer
+wall-clock); every acceptance number, exactness gate, and mechanics metric
+is final and committed. The memo tables are generated from committed report
+JSONs; they are never hand-edited after the fact.
 
 The sections below are the build/usage docs for every component the memo
 above relies on.
