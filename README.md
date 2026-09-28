@@ -12,9 +12,28 @@ against eval sets frozen and checksummed before the GPU was touched.
 accepted tokens per verification step τ from **3.32 → 4.07** on in-domain
 xLAM-500 and **2.63 → 3.04** on held-out-tool multi-turn ToolBench-500
 (non-overlapping bootstrap CIs), which shows up in vLLM wall-clock as
-**2.22× → ~2.5×** over plain autoregressive decoding — all with
+**2.22× → 2.45×** over plain autoregressive decoding — all with
 **token-identical outputs** (exactness gates pass; the one 49/50 gate is
 root-caused to bf16 near-ties, not the algorithm).
+
+## Draft checkpoints (Hugging Face)
+
+All four trained drafts are published — bf16 copies of the fp32 training
+checkpoints, verified token-identical to them on 50 frozen prompts before
+upload, with per-model READMEs carrying their measured τ/α/exactness:
+
+| Checkpoint | Pipeline | xLAM τ / TB τ (k=5, greedy) |
+|---|---|---|
+| [vaishaalli/stage1-kd](https://huggingface.co/vaishaalli/stage1-kd) | Stage-1 KD, xLAM contexts | 4.01 / 2.65 |
+| [vaishaalli/tb-kd](https://huggingface.co/vaishaalli/tb-kd) | KD, ToolBench contexts (ablation A) | 4.07 / 3.04 |
+| [vaishaalli/stage2-gkd-mixed](https://huggingface.co/vaishaalli/stage2-gkd-mixed) | on-policy GKD, 1:1 TB:xLAM | 4.18 / 2.94 |
+| [vaishaalli/stage2-gkd-tbonly](https://huggingface.co/vaishaalli/stage2-gkd-tbonly) | on-policy GKD, TB-only (final) | 4.05 / 3.04 |
+
+Use any of them directly as a vLLM speculative-decoding draft:
+`speculative_config = {"method": "draft_model", "model": "vaishaalli/tb-kd",
+"num_speculative_tokens": 5, "max_model_len": 16384}`. The recommendation
+is `tb-kd` — the off-policy checkpoint that matched on-policy GKD at a
+fraction of the training cost (see finding 3 below).
 
 ---
 
@@ -126,7 +145,7 @@ non-overlap claim hold under either convention.
 | n-gram | 111.5 | 1.67× |
 | Untuned draft | 148.0 | 2.22× |
 | Stage-1 KD draft | 169.3 | 2.54× |
-| Stage-2 (TB-only) draft | ⏳ *pending* | ⏳ |
+| Stage-2 (TB-only) draft | 163.8 | 2.45× |
 | Stage-2 draft, batch 32 | ⏳ *pending* | ⏳ |
 
 **Where the gain lives** (α by region, xLAM-500; the region map is produced
