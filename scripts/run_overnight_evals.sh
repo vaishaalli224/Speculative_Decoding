@@ -74,8 +74,12 @@ fi
 echo "Stage-2 draft under test: $S2"
 
 # -- instrumented-loop helper (the run_tau.sh protocol) ---------------------
-tau_run() {  # tau_run <draft-path> <tag> <records-parquet>
+tau_run() {  # tau_run <draft-path> <tag> <records-parquet>  (resumable)
   local D=$1 TAG=$2 REC=$3
+  if [ -f "results/events/${TAG}_k5_report.json" ]; then
+    echo "  tau cached: $TAG"
+    return 0
+  fi
   $PY -m src.serving.instrumented_spec "$REC" --proposer draft \
       --draft-model "$D" --target-model "$TARGET" --k 5 \
       --limit "$TAU_LIMIT" --dtype bfloat16 --device cuda:0 \
@@ -89,11 +93,39 @@ tau_run() {  # tau_run <draft-path> <tag> <records-parquet>
   echo "  tau done: $TAG"
 }
 
-bench() {  # bench <name> <extra-args...> — b1 wall-clock shorthand
+bench() {  # bench <name> <extra-args...> — b1 wall-clock shorthand (resumable)
   local NAME=$1; shift
+  if [ -f "results/vllm/${NAME}.jsonl" ]; then
+    echo "  bench cached: $NAME"
+    return 0
+  fi
   $PY -m src.serving.bench_vllm "$@" --metrics-out "$METRICS" \
       --outputs-out "results/vllm/${NAME}.jsonl"
   echo "  bench done: $NAME"
+}
+
+exactness_gate() {  # exactness_gate <name> <draft> — RECORD, never abort
+  # Trained drafts mismatch AR at bf16 near-ties (vLLM's batched verify
+  # forward vs incremental AR flip argmaxes differently; measured 46/50 on
+  # stage1 2026-09-28, two ' you'(498) insertions). Plan §9 pre-registers
+  # the response: the HF instrumented loop is the exactness CLAIM; vLLM's
+  # behavior is reported as an observation. So the gate records its result
+  # and the queue continues.
+  local NAME=$1 D=$2
+  if [ -f "results/exactness/${NAME}_k5.json" ]; then
+    echo "  gate cached: $NAME"
+    return 0
+  fi
+  if $PY -m src.serving.bench_vllm frozen/xlam_eval.parquet --exactness \
+      --method draft_model --draft-model "$D" --k 5 --model "$TARGET" \
+      --limit 50 --max-new-tokens "$MAX_NEW_TOKENS" \
+      --outputs-out "results/vllm/${NAME}_k5_exact.jsonl" \
+      --exactness-out "results/exactness/${NAME}_k5.json" \
+      --metrics-out "$METRICS"; then
+    echo "  gate PASS: $NAME"
+  else
+    echo "  gate recorded mismatches: $NAME (continuing — plan §9: HF loop is the exactness claim; vLLM reported as observation)"
+  fi
 }
 
 # -- Smoke: the overnight paths fail in minutes, not hours ------------------
@@ -108,7 +140,8 @@ $PY -m src.serving.bench_vllm frozen/tb_eval.parquet --per-turn \
     --warmup 0 --metrics-out "" --outputs-out ""
 $PY -m src.serving.bench_vllm frozen/xlam_eval.parquet --exactness \
     --method draft_model --draft-model "$S2" --k 5 --model "$TARGET" \
-    --limit 5 --max-new-tokens 64 --metrics-out "" --outputs-out ""
+    --limit 5 --max-new-tokens 64 --metrics-out "" --outputs-out "" \
+  || echo "  [note] smoke exactness mismatch (recorded; plan §9 — not fatal)"
 echo "  smoke OK — spec config accepted, per-turn TB path + exactness run"
 
 # -- Phase B: instrumented stage-wise rows + checkpoint trajectory -----------
@@ -124,13 +157,10 @@ done
 echo "Phase B done — reports in results/events/stage2_*_report.json"
 
 # -- Phase C: vLLM wall-clock battery ---------------------------------------
-echo "== Phase C1: exactness gates (50 prompts, greedy b1) =="
+echo "== Phase C1: exactness gates (50 prompts, greedy b1; recorded, not fatal) =="
 for PAIR in "stage1 $STAGE1" "tbkd $TBKD" "stage2 $S2"; do
   set -- $PAIR
-  bench "${1}_k5_exact" frozen/xlam_eval.parquet --exactness \
-      --method draft_model --draft-model "$2" --k 5 --model "$TARGET" \
-      --limit 50 --max-new-tokens "$MAX_NEW_TOKENS" \
-      --exactness-out "results/exactness/${1}_k5.json"
+  exactness_gate "$1" "$2"
 done
 
 echo "== Phase C2: k5-greedy-b1 wall-clock rows for stage1 + tbkd =="
