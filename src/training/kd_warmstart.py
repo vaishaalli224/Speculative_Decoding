@@ -76,8 +76,15 @@ p=0 mass and are masked out of the sum — 0 * -inf is NaN, not 0.
 CLI (thin; every behavior is an importable, tested function):
   python -m src.training.kd_warmstart --data data/processed/stage1_kd \
       --draft Qwen/Qwen2.5-Coder-0.5B-Instruct --epochs 2 \
-      --dtype bfloat16 --device cuda:0 --out checkpoints/stage1
+      --dtype float32 --device cuda:0 --out checkpoints/stage1
   Local toy dry run: --limit 32 --max-len 512 --epochs 1 --dtype float32
+
+DTYPE NOTE (measured 2026-09-27 on the rented H100): full-bf16 training
+NaN-poisons the weights within ~4 optimizer steps on this data (forward/
+loss/backward all verified finite individually; the parameters themselves
+go non-finite between optimizer steps — bf16 AdamW state precision).
+Use --dtype float32 on the GPU; a 0.5B trains in minutes anyway. Do not
+re-run bf16 without fp32 master weights.
 """
 
 from __future__ import annotations
