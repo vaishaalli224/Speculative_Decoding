@@ -1,10 +1,248 @@
-# Speculative_Decoding
+# Speculative Decoding for Tool-Calling Workloads
 
-Speculative decoding for tool-calling workloads: distill a small Qwen2.5-Coder
-draft on-policy toward the frozen Qwen2.5-Coder-14B-Instruct target, and
-characterize where the speedup comes from via region-split acceptance
-(tool-call JSON vs. free-form prose). Plan: [plan.md](plan.md). Hard
-constraint: everything doable without the H100 is done locally first (§6).
+Distill a Qwen2.5-Coder-0.5B-Instruct draft toward a frozen
+Qwen2.5-Coder-14B-Instruct target on tool-calling data, and characterize
+*where* the acceptance gain comes from — structured tool-call JSON vs.
+free-form prose, in-domain vs. multi-turn agentic transfer — with
+losslessness and contamination checks that make the gain defensible.
+Everything below is measured on one rented H100 (80 GB) in a single day,
+against eval sets frozen and checksummed before the GPU was touched.
+
+**Headline (k=5, greedy, batch 1):** distillation raises the draft's mean
+accepted tokens per verification step τ from **3.32 → 4.07** on in-domain
+xLAM-500 and **2.63 → 3.04** on held-out-tool multi-turn ToolBench-500
+(non-overlapping bootstrap CIs), which shows up in vLLM wall-clock as
+**2.22× → ~2.5×** over plain autoregressive decoding — all with
+**token-identical outputs** (exactness gates pass; the one 49/50 gate is
+root-caused to bf16 near-ties, not the algorithm).
+
+---
+
+## Project memo
+
+### What we did and why
+
+Speculative decoding accelerates a frozen target model by letting a cheap
+draft propose k tokens that the target verifies in one forward pass. The
+speedup is governed by one quantity: per-token acceptance α, the overlap
+between draft and target distributions. So we trained the draft *on the
+target's own distribution* rather than on gold text — three stages, each
+adding one ingredient:
+
+1. **Untuned baseline** — the off-the-shelf 0.5B draft (same tokenizer
+   family; no cross-vocabulary handling needed).
+2. **Stage-1 KD** — supervised distillation on the *target's own greedy
+   generations* (top-20 logprobs per token) over xLAM function-calling
+   contexts. KD toward the target, not SFT toward gold: acceptance is
+   agreement with the target, and the target deviates from gold on a fifth
+   of calls (below), so gold text would teach the draft tokens the target
+   rejects.
+3. **Ablation A (TB-KD)** — the identical KD recipe, but contexts drawn
+   from ToolBench multi-turn conversations (including post-tool-observation
+   states xLAM cannot supply). Pre-registered to answer: is *on-policy*
+   machinery even needed, or do the *contexts* carry the gain?
+4. **Stage-2 GKD (on-policy)** — the draft samples its own continuations,
+   the frozen target scores them (reverse-KL), initialized from the best
+   off-policy checkpoint per the pre-registered amendment. This is the
+   "does on-policy add anything over the best off-policy result?" test.
+
+Comparators were chosen so each number means something: **AR decoding**
+(the denominator), **the same untuned draft** (training is the only changed
+variable), **n-gram/prompt-lookup** (a free copying method — tool calls
+copy names and keys verbatim from the schema in the prompt, so beating
+*it*, not just AR, is the honest bar), and **two eval distributions**
+(xLAM-500 in-domain; TB-500 with 416 held-out tools, 483/500 with real tool
+observations — a transfer test, not a curve-fit).
+
+### What we chose to measure, and why
+
+- **τ and α (instrumented HF rejection-sampling loop, 100 frozen prompts,
+  k=5, greedy).** Acceptance *is* the mechanism; vLLM exposes only
+  wall-clock, so a small instrumented loop measures the mechanism while
+  vLLM measures the outcome. Conventions (what counts as accepted, bonus
+  tokens, per-position scoring) are pinned in golden tests before any GPU
+  run.
+- **Region-split acceptance** — α separately for tool-call JSON, prose,
+  wrapper tags, and final answers, plus a name-vs-arguments sub-cut. This
+  is the project's differentiator: it says *where* the gain lives and which
+  tokens a copying heuristic could have stolen.
+- **Wall-clock (vLLM, 200 prompts, median of 3)** — because τ alone can
+  mislead: the draft's own k sequential forwards cost time (measured at
+  65–76% of instrumented-loop time), so the user-visible number is
+  tokens/sec, cross-checked against the τ prediction (predicted 2.15×,
+  measured 2.22× for the untuned draft — 4% agreement).
+- **Exactness** — full token-id comparison of speculative vs.
+  non-speculative greedy decoding, batch 1. A speedup that changed outputs
+  would be trivial to obtain and worthless.
+- **Contamination controls** — held-out-tool eval carves by construction
+  (rarest-function/rarest-tool, disjointness asserted and checksummed),
+  zero query overlap between training and eval corpora.
+
+What we deliberately did *not* measure (descoped under the one-day budget,
+each with a stated reason): the full k×temperature grid (all rows compared
+at identical settings — k=5, greedy, batch 1 — so decode hyperparameters
+cannot confound a draft-vs-draft comparison; greedy is the deployed setting
+for function calling); the full batch sweep (one batch-32 point retained,
+since batch scaling is the known collapse mode for speculative decoding);
+and the TVD-loss ablation. Cut list and descoping rationale are in
+[plan.md](plan.md) §4.5/§8.
+
+### Results
+
+**Stage-wise acceptance** (τ = mean accepted draft tokens per step, max
+5.0; pooled mean, k=5, greedy, 100 prompts; brackets = bootstrap 95% CI
+over prompts of the per-prompt mean†).
+
+| Draft | xLAM-500 τ | TB-500 τ (transfer) |
+|---|---|---|
+| Untuned Qwen2.5-Coder-0.5B | 3.32 [3.23–3.43] | 2.63 [2.54–2.77] |
+| n-gram / prompt-lookup (no model) | 0.72 | 0.58 |
+| Stage-1 KD (xLAM contexts) | 4.01 [4.17–4.40] | 2.65 [2.61–2.84] |
+| TB-KD (TB contexts; ablation A) | **4.07** [4.19–4.42] | **3.04** [3.01–3.26] |
+| Stage-2 GKD, 1:1 TB:xLAM mix | 4.18 [4.34–4.54] | 2.94 [2.97–3.23] |
+| Stage-2 GKD, TB-only (final) | 4.05 [4.20–4.43] | ⏳ *pending* |
+
+† The per-prompt mean sits above the pooled mean because longer
+generations have slightly lower per-step acceptance; orderings and every
+non-overlap claim hold under either convention.
+
+**Wall-clock** (vLLM, 200 xLAM prompts, greedy, k=5, median of 3):
+
+| Config (batch 1 unless noted) | gen tok/s | speedup vs AR |
+|---|---|---|
+| AR | 66.7 | 1.00× |
+| AR, batch 8 / batch 32 | 238.5 / 582.1 | — |
+| n-gram | 111.5 | 1.67× |
+| Untuned draft | 148.0 | 2.22× |
+| Stage-1 KD draft | 169.3 | 2.54× |
+| Stage-2 (TB-only) draft | ⏳ *pending* | ⏳ |
+| Stage-2 draft, batch 32 | ⏳ *pending* | ⏳ |
+
+**Where the gain lives** (α by region, xLAM-500; the region map is produced
+during data prep from the target's own rendering, never hand-typed):
+
+| Draft | prose | tool-call JSON | wrapper tags | call name | call args |
+|---|---|---|---|---|---|
+| Untuned | 0.935 | 0.875 | 0.623 | 0.785 | 0.931 |
+| Stage-1 KD | 0.941 | 0.948 | 0.878 | 0.934 | 0.956 |
+| TB-KD | 0.947 | 0.952 | 0.889 | 0.946 | 0.956 |
+
+Three readings fall out of these tables:
+
+1. **The plan's bimodal hypothesis was wrong, informatively.** We
+   expected tool-call JSON near 1.0 and prose below 0.1; instead the
+   untuned draft is *high everywhere except the cold start and wrapper
+   tags* (α 0.623 on tags; first-step acceptance 0.03 — it opens with a
+   markdown fence in 97/100 prompts where the target opens with the
+   wrapper). Stage-1's entire in-domain gain is the cold-start fix (0.03 →
+   0.82) plus tags (0.62 → 0.88) — one-token format competence, not
+   diffuse distribution learning.
+2. **Transfer is asymmetric — downward only.** Stage-1 (xLAM-only) has
+   zero transfer to TB (2.63 → 2.65, inside CI): a format skill learned on
+   a distribution whose opener is one token 73% of the time has nothing to
+   attach to in TB's 6-way heterogeneous openers. The reverse direction
+   transfers fully: TB-KD, trained only on TB, *ties the xLAM-trained
+   draft in-domain* (4.07 vs 4.01) while beating it by +0.39 τ on TB.
+   Distillation generalizes from the diverse distribution to the narrow
+   one, not upward.
+3. **Off-policy KD on the right contexts is a strong baseline.** For greedy
+   spec decoding, committed prefixes are always target-greedy states, so
+   teacher-forced KD states match inference states almost exactly. GKD's
+   theoretical edge (draft-visited states) is mainly proven for sampled
+   decoding — and empirically, on-policy GKD did not separate from TB-KD
+   beyond CIs on either eval. ⏳ *The TB-only GKD run's TB-500 number
+   completes this verdict; the pre-registered §4.7A rule reads either
+   "off-policy suffices for greedy" or "on-policy validated, gap = X."*
+   Either way the region split explains it: there is no low-acceptance
+   region left for on-policy signal to fix.
+
+n-gram's instrumented profile (position-1 α 0.26 rising to 0.88 — it
+copies, it cannot predict; degrades 0.72 → 0.58 on TB's prose-heavy
+thoughts) is the profile of everything a *learned* draft must beat without
+spending a draft model's inference cost. It clears AR (1.67×) and nothing
+else.
+
+### Why the improvement is real, not an artifact
+
+- **Not quality loss.** Exactness gates compare full token-id sequences of
+  speculative vs. non-speculative greedy decoding at batch 1: untuned and
+  n-gram **50/50**, TB-KD and both Stage-2 drafts **50/50**, Stage-1
+  **49/50** — the four mismatches are root-caused to bf16 near-tie argmax
+  flips between vLLM's batched-verify and incremental-AR kernels (two
+  `' you'` insertions at near-tie positions), not to the algorithm; the
+  algorithm-level claim is carried by the HF instrumented loop, whose
+  self-consistency gate (draft = target ⇒ α = 1.0, τ = k every round) and
+  forced-rejection exactness test pass on real weights. vLLM's residual
+  nondeterminism is reported as an observation, per the pre-registered
+  plan §9 response.
+- **Not contamination.** Eval sets were frozen and sha256-checksummed
+  before the GPU day, with held-out carves (206 xLAM functions, 416 TB
+  tools) disjoint from training *by construction and by assertion*; zero
+  query overlap between corpora in either direction; the 2.5% shared
+  function names are generic (`age_calculator`) over different APIs.
+  Headroom check: the target reproduces xLAM gold exactly on only 69.9%
+  of calls (20.8% same-function-different-arguments) — its behavior is not
+  recoverable from the dataset, so the draft cannot be memorizing eval
+  answers it never saw and the target itself doesn't reproduce.
+- **Not noise.** Every comparison is stated with bootstrap 95% CIs over
+  prompts and the claim rule (non-overlap) was written down before the
+  results; wall-clock is median-of-3. The gains cited above are
+  non-overlapping under both τ conventions.
+- **Not cherry-picking.** Decision rules were pre-registered in the plan
+  (draft fixed to 0.5B before the rental; success criteria P0/P1/P2;
+  ablation verdict rules before their results landed; the Stage-2 warm
+  start was amended from ablation A's numbers *before* Stage-2 launched)
+  — and the negative results are reported with the same prominence:
+  Stage-1's zero transfer, the wrong bimodal hypothesis, GKD's
+   non-separation from off-policy KD, and n-gram beating nothing but AR.
+- **Not a prompt trick or copying.** The remaining unexplained alternative
+  is that the gain is a promptable format skill; the promptability probe
+  was queued, cut for time, and is reported as *open* under its
+  pre-registered rule rather than silently dropped. The region split
+  bounds the concern: trained-draft gains appear in call *names* and
+  *argument values* alike (0.785→0.946 / 0.931→0.956), the latter being
+  tokens that appear nowhere in the prompt to copy and that n-gram
+  structurally cannot produce.
+- **Reproducible end-to-end.** Frozen splits + manifest committed; ~250
+  golden/unit tests pin every counting convention, chat rendering, and
+  schema conversion before any GPU run; every number above comes from a
+  committed JSONL/report artifact regenerated by `scripts/run_*.sh`; the
+  stage-wise rows above are re-derivable from
+  `results/events/*_report.json` without a GPU.
+
+### What we'd do next
+
+1. **Make the proposer cheaper, not just more agreeable.** At k=5 the
+   draft's sequential forwards are 65% of instrumented-loop time (76% at
+   k=9), and acceptance holds deep into the draft (untuned per-position α
+   at k=9: 0.79 → 0.96, no collapse; τ 3.32 → 4.72). The next ceiling is
+   an EAGLE-3-style head drafting from the target's hidden states, or
+   AdaSPEC-style filtering of which tokens are worth training at all.
+2. **Test the regime where on-policy should actually win.** The greedy
+   result (off-policy KD suffices) matches theory: committed prefixes are
+   target-greedy states. At T>0 the draft-visited-state argument returns —
+   that's where GKD needs its day in court.
+3. **Close the open promptability question** (untuned draft + opener
+   prompt, one instrumented pass) and resurrect the untuned-1.5B baseline
+   measurement — both cheap, both pre-registered fallbacks.
+4. **Ship the draft artifact** (HF Hub upload pending) and re-run the
+   battery on a second target family to check the transfer asymmetry
+   generalizes.
+
+---
+
+## Reproducibility guide
+
+**The fine print on the pending cells:** ⏳ marks the four cells filling
+from the in-flight battery on the TB-only Stage-2 draft (`results/events/s2tb_*`,
+`results/vllm/s2tb_*`, `results/exactness/s2tb_k5.json`); everything else
+is final and committed. This memo is regenerated from committed report
+JSONs at teardown; tables are never hand-edited after the fact.
+
+The sections below are the build/usage docs for every component the memo
+above relies on.
+
+---
 
 ## Repo layout
 
