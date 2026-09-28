@@ -73,6 +73,67 @@ copy names and keys verbatim from the schema in the prompt, so beating
 (xLAM-500 in-domain; TB-500 with 416 held-out tools, 483/500 with real tool
 observations — a transfer test, not a curve-fit).
 
+### Design choices and rationale
+
+**Draft model: Qwen2.5-Coder-0.5B-Instruct.**
+
+- *Size.* Scaling-law work on speculative decoding
+  ([SDSL, Bozorgkhoo & Molybog, 2026](https://arxiv.org/abs/2603.11053))
+  finds the throughput-optimal draft is roughly two orders of magnitude
+  smaller than its target, robustly across model families. For a 14B
+  target that points well below 1B; the 0.5B is the smallest model in the
+  Qwen2.5-Coder family, giving a 28× ratio — the closest the family allows.
+  Profiling work ([Yan et al., "Decoding Speculative
+  Decoding"](https://arxiv.org/abs/2402.01528)) reaches the consistent
+  conclusion that draft *latency* matters as much as draft accuracy; our
+  measured 65% draft time share (below) confirms it here.
+- *Same family, same tokenizer.* No cross-tokenizer alignment is needed;
+  the only adaptation was zero-padding the draft's embedding to satisfy
+  vLLM's vocab-size check (results log §2.2).
+- *Pre-registered.* The planned 0.5B-vs-1.5B comparison was cancelled
+  before the rental on these prior grounds. Accepted cost: no head-to-head
+  numbers for this setup (re-listed in Next steps).
+
+**Method: distill a standalone draft, not EAGLE-3 or other head-based
+drafters.**
+
+- *Budget.* One rented H100, one day. Distilling a 0.5B draft is cheap:
+  Stage-1 KD trains in ~25 min in fp32; TB-KD reached its final quality
+  in about one hour.
+- *Why not EAGLE-3 / Medusa-style heads.* These train a head that drafts
+  from the *target's* hidden states, which requires running the 14B target
+  over the training set to extract features plus a longer training run —
+  not affordable in the same day as the full evaluation battery. A
+  standalone draft also drops directly into vLLM's `draft_model` config
+  with no target-side changes.
+- *Why KD toward the target, not SFT toward gold.* Acceptance is agreement
+  with the *target*, and the target reproduces xLAM gold exactly on only
+  69.9% of calls. The pipeline follows
+  [DistillSpec (Zhou et al.)](https://arxiv.org/abs/2310.08461):
+  off-policy KD on the target's greedy generations, then on-policy GKD.
+- *Trade-off acknowledged.* Head-based drafters remove most of the
+  draft's sequential cost — now our binding constraint — which is why they
+  are the first research item in Next steps.
+
+**Datasets: two distributions, with held-out tools.**
+
+- *xLAM (in-domain).* Single-turn function calling in the target's
+  tool-call format — the natural train/eval distribution for "does
+  distillation help on the target task?" Eval uses a rarest-function carve
+  (206 held-out functions).
+- *ToolBench (transfer).* Multi-turn agent conversations with real tool
+  observations (483/500 eval records) and 416 held-out tools. It supplies
+  states xLAM cannot — post-observation reasoning, heterogeneous openers,
+  prose-heavy thoughts — a harder, more realistic agentic workload.
+- *Why two distributions make the gain more credible.* A gain on one
+  in-domain eval could be curve-fitting. Here gains appear (1) on tools the
+  draft never trained on, (2) on a different conversational structure, and
+  (3) *across* datasets: TB-KD, trained only on ToolBench, ties the
+  xLAM-trained draft on xLAM (4.07 vs 4.01). Memorization cannot explain a
+  gain on data the model never saw. The failure case is also informative:
+  Stage-1's zero transfer to TB shows the eval is sensitive enough to
+  detect a gain that does *not* generalize.
+
 ### What we chose to measure, and why
 
 - **τ and α (instrumented HF rejection-sampling loop, 100 frozen prompts,
@@ -172,6 +233,43 @@ On TB-500 the trained drafts' acceptance is **flat across every region**
 s2tb nearly identical) — no bimodality, and importantly no low-acceptance
 pocket left anywhere.
 
+**Summary comparison: n-gram vs untuned vs tuned drafts** (k=5, greedy;
+speedups vs AR at the same batch size; ≈ = estimate, not measured —
+method below; — = not measured):
+
+| Metric | n-gram | Untuned | Stage-1 KD | TB-KD | Stage-2 mixed | Stage-2 TB-only |
+|---|---|---|---|---|---|---|
+| xLAM τ | 0.72 | 3.32 | 4.01 | 4.07 | 4.18 | 4.05 |
+| TB τ | 0.58 | 2.63 | 2.65 | 3.04 | 2.94 | 3.04 |
+| xLAM α | 0.44 | 0.890 | 0.942 | 0.948 | — | — |
+| TB α | 0.38 | 0.811 | 0.812 | 0.852 | — | — |
+| First-token α₀ (xLAM) | — | 0.03 | 0.82 | — | — | — |
+| Wrapper-tag α (xLAM) | — | 0.623 | 0.878 | 0.889 | — | — |
+| Call-name α (xLAM) | — | 0.785 | 0.934 | 0.946 | — | — |
+| Call-args α (xLAM) | — | 0.931 | 0.956 | 0.956 | — | — |
+| Speedup, xLAM batch 1 | 1.67× | 2.22× | 2.54× | ≈2.55× | ≈2.60× | 2.45× |
+| Speedup, xLAM batch 32 | 1.55× | ≈2.01× | ≈2.33× | ≈2.36× | ≈2.41× | 2.35× |
+| Speedup, TB per-turn | 1.52× | ≈1.90× | ≈1.92× | ≈2.12× | ≈2.07× | 2.12× |
+| Exactness (50 prompts) | 50/50 | 50/50 | 49/50‡ | 50/50 | 50/50 | 50/50 |
+
+‡ Root-caused to bf16 near-tie argmax flips between vLLM kernels, not the
+algorithm (see "Why the improvement is real").
+
+*How the ≈ speedups are estimated.* Under greedy decoding every
+verification step emits τ + 1 tokens (the accepted draft tokens plus
+exactly one target token — bonus or correction), so
+speedup ≈ (τ + 1) / C, where C is the cost of one speculative step in
+units of one AR step. C is calibrated per setting from the measured rows:
+xLAM batch 1 uses the mean over the three measured drafts (C ≈ 1.99,
+spread 1.95–2.06); TB per-turn (C ≈ 1.91) and xLAM batch 32 (C ≈ 2.15)
+use the measured Stage-2 row. This is valid because every draft shares
+one architecture, so per-step cost does not depend on which checkpoint
+is loaded. Expected error is about ±0.1× (the spread among measured
+batch-1 rows — e.g. Stage-1 and Stage-2 have near-equal τ but measured
+2.54× vs 2.45×). Only speedups are estimated; acceptance diagnostics have
+no defensible estimator and stay "—". Every ≈ cell is a pending
+measurement (Next steps 1–3).
+
 Three readings fall out of these tables:
 
 1. **The plan's bimodal hypothesis was wrong, informatively.** We
@@ -234,6 +332,9 @@ else.
   of calls (20.8% same-function-different-arguments) — its behavior is not
   recoverable from the dataset, so the draft cannot be memorizing eval
   answers it never saw and the target itself doesn't reproduce.
+- **Not overfitting to one distribution.** Gains hold on held-out tools and
+  transfer across datasets (TB-trained draft ties the xLAM-trained draft on
+  xLAM); see "Design choices → Datasets".
 - **Not noise.** Every comparison is stated with bootstrap 95% CIs over
   prompts and the claim rule (non-overlap) was written down before the
   results; wall-clock is median-of-3. The gains cited above are
@@ -253,41 +354,60 @@ else.
   *argument values* alike (0.785→0.946 / 0.931→0.956), the latter being
   tokens that appear nowhere in the prompt to copy and that n-gram
   structurally cannot produce.
-- **Reproducible end-to-end.** Frozen splits + manifest committed; ~250
-  golden/unit tests pin every counting convention, chat rendering, and
-  schema conversion before any GPU run; every number above comes from a
-  committed JSONL/report artifact regenerated by `scripts/run_*.sh`; the
-  stage-wise rows above are re-derivable from
-  `results/events/*_report.json` without a GPU.
+- **Reproducible end-to-end.** Frozen splits + manifest committed; a
+  golden/unit test suite (component breakdown in [Testing](#testing)) pins
+  every counting convention, chat rendering, and schema conversion before
+  any GPU run; every measured number above comes from a committed
+  JSONL/report artifact regenerated by `scripts/run_*.sh`; the stage-wise
+  rows above are re-derivable from `results/events/*_report.json` without
+  a GPU.
 
-### What we'd do next
+### Next steps
 
-1. **Make the proposer cheaper, not just more agreeable.** At k=5 the
+**Pending evaluations** (each replaces a ≈ or — cell in the summary
+comparison; all are single runs of existing scripts):
+
+1. **TB-KD wall-clock** — the recommended checkpoint has τ but no
+   wall-clock: xLAM batch 1, batch 32, and TB per-turn.
+2. **Untuned draft at batch 32 and on TB per-turn** — needed to state the
+   tuned-vs-untuned speedup gain under batching and on the transfer set.
+3. **Stage-1 and Stage-2-mixed wall-clock** on TB per-turn and batch 32
+   (Stage-2-mixed also at xLAM batch 1 — it has the best xLAM τ, 4.18).
+4. **Missing diagnostic rows** — α, α₀, and region split for both Stage-2
+   drafts; region split for n-gram.
+5. **Ablation B (promptability probe)** — untuned draft + opener prompt,
+   one instrumented pass; pre-registered, cut for time, still open.
+6. **Untuned 1.5B baseline** — the pre-registered fallback for the
+   cancelled draft-size comparison.
+7. **Descoped grids** — k ∈ {3, 5, 7, 9} × {greedy, T=1.0}, a batch-8
+   point, and the TVD-loss ablation.
+
+**Research directions:**
+
+8. **Make the proposer cheaper, not just more agreeable.** At k=5 the
    draft's sequential forwards are 65% of instrumented-loop time (76% at
    k=9), and acceptance holds deep into the draft (untuned per-position α
    at k=9: 0.79 → 0.96, no collapse; τ 3.32 → 4.72). The next ceiling is
    an EAGLE-3-style head drafting from the target's hidden states, or
    AdaSPEC-style filtering of which tokens are worth training at all.
-2. **Test the regime where on-policy should actually win.** The greedy
+9. **Test the regime where on-policy should actually win.** The greedy
    result (off-policy KD suffices) matches theory: committed prefixes are
    target-greedy states. At T>0 the draft-visited-state argument returns —
    that's where GKD needs its day in court.
-3. **Close the open promptability question** (untuned draft + opener
-   prompt, one instrumented pass) and resurrect the untuned-1.5B baseline
-   measurement — both cheap, both pre-registered fallbacks.
-4. **Ship the draft artifact** (HF Hub upload pending) and re-run the
-   battery on a second target family to check the transfer asymmetry
-   generalizes.
+10. **Re-run the battery on a second target family** to check whether the
+    transfer asymmetry generalizes.
 
 ---
 
 ## Reproducibility guide
 
-**The fine print on the pending cells:** none remain — every number in the
-memo is final, measured, and committed (`results/events/`,
-`results/exactness/`, `results/metrics.jsonl`, `results/vllm/`). The memo
-tables are generated from committed report JSONs; they are never hand-edited
-after the fact.
+**The fine print on the pending cells:** every *measured* number in the
+memo is final and committed (`results/events/`, `results/exactness/`,
+`results/metrics.jsonl`, `results/vllm/`); the measured tables are
+generated from committed report JSONs and never hand-edited after the
+fact. The only exceptions are the ≈-marked speedups in the summary
+comparison, which are model-derived estimates (method stated beneath that
+table) and are listed as pending measurements in Next steps 1–3.
 
 The sections below are the build/usage docs for every component the memo
 above relies on.
@@ -328,7 +448,7 @@ Reproduce from scratch (Python 3.12 venv, pinned requirements.txt):
 .venv/bin/python -m src.data_prep.toolbench_clean build --split eval
 .venv/bin/python -m src.data_prep.toolbench_clean build --split prefixes
 .venv/bin/python -m src.data_prep.freeze_splits freeze     # rebuild frozen/ + manifest
-.venv/bin/python -m pytest tests/                          # 63 tests
+.venv/bin/python -m pytest tests/                          # full test suite
 ```
 
 ## Acceptance evaluation (plan.md §6.4 — done)
@@ -496,10 +616,15 @@ python -m src.data_prep.build_distill_data assemble \
   (never hand-rolled); tool-call tags are probe-derived, not hand-typed.
   Region codes per token: 0=context / 1=assistant prose / 2=tool-call JSON /
   3=tag / 4=final answer.
+- Why these two datasets were chosen, and why cross-dataset transfer
+  supports the result, is in the memo under "Design choices and rationale".
 
 ## Testing
 
-191 tests (torch-free suite): golden template/region facts, the instrumented loop's C1–C7 convention/multi-turn/n-gram golden cases, xLAM conversion, ToolBench cleaning
+Run `.venv/bin/python -m pytest tests/ --collect-only -q` for the current
+total. The torch-free core suite covers golden template/region facts, the
+instrumented loop's C1–C7 convention/multi-turn/n-gram golden cases, xLAM
+conversion, ToolBench cleaning
 (columnar conversations, `Action Input:` variants, JSON `true/false`
 payloads, retry-draft blocks, truncated envelopes, retry user turns, Finish
 conversion), freeze tamper-detection, and acceptance-metrics golden cases
