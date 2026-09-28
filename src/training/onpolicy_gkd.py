@@ -631,10 +631,12 @@ class OnPolicyGKDTrainer:
                     }) + "\n")
                     n_samples += 1
             micro += 1
-            if micro >= self.grad_accum:
+            if micro % self.grad_accum == 0:
+                # micro is MONOTONIC across the run (it indexes the mix
+                # plan); only the accumulation boundary resets — a micro
+                # counter zeroed here would pin the plan to slot 0 forever
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                micro = 0
                 global_step += 1
                 st.step = global_step
                 st.tokens_sampled += n_rows

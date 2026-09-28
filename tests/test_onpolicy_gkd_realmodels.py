@@ -138,7 +138,9 @@ def test_gkd_tiny_e2e(tmp_path):
         (tmp_path / "out" / "tau_2.json").read_text()
     )
     assert tau["n_events"] >= 1
-    assert 0.0 <= tau["tau"] <= 1.0 and 0.0 <= tau["alpha"] <= 1.0
+    # tau = accepted tokens per step (can exceed 1 with the bonus; it is
+    # bounded by k), alpha is a rate in [0, 1]
+    assert 0.0 <= tau["tau"] <= 3 and 0.0 <= tau["alpha"] <= 1.0
     # the samples.jsonl on-policy record: >= 1 sampled context logged
     samples = [
         json.loads(l)
