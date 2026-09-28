@@ -146,7 +146,17 @@ non-overlap claim hold under either convention.
 | Untuned draft | 148.0 | 2.22× |
 | Stage-1 KD draft | 169.3 | 2.54× |
 | Stage-2 (TB-only) draft | 163.8 | 2.45× |
-| Stage-2 draft, batch 32 | ⏳ *pending* | ⏳ |
+| Stage-2 draft, batch 32 | 1365.8 | 2.35× vs AR-b32 |
+| n-gram, batch 32 | 899.8 | 1.55× vs AR-b32 |
+
+TB-500 per-turn transfer wall-clock (same teacher-forced multi-turn states
+the instrumented loop scores): AR 66.7 → n-gram 101.6 (**1.52×**) →
+Stage-2 draft 141.2 tok/s (**2.12×**) — the transfer gain is real in
+wall-clock, and n-gram degrades there exactly as its instrumented
+profile predicted (its TB τ 0.58 vs xLAM 0.72), while the trained draft
+*widens* its lead. Batch scaling: the Stage-2 speedup narrows 2.45× →
+2.35× from batch 1 → 32 but does not collapse — consistent with the
+draft-forward share of loop time shrinking as verify batches amortize.
 
 **Where the gain lives** (α by region, xLAM-500; the region map is produced
 during data prep from the target's own rendering, never hand-typed):
@@ -273,12 +283,11 @@ else.
 
 ## Reproducibility guide
 
-**The fine print on the pending cells:** ⏳ marks the two wall-clock cells
-still filling from the in-flight vLLM phase on the TB-only Stage-2 draft
-(`results/vllm/s2tb_*` — b1 xLAM row mid-run, then b32 and TB transfer
-wall-clock); every acceptance number, exactness gate, and mechanics metric
-is final and committed. The memo tables are generated from committed report
-JSONs; they are never hand-edited after the fact.
+**The fine print on the pending cells:** none remain — every number in the
+memo is final, measured, and committed (`results/events/`,
+`results/exactness/`, `results/metrics.jsonl`, `results/vllm/`). The memo
+tables are generated from committed report JSONs; they are never hand-edited
+after the fact.
 
 The sections below are the build/usage docs for every component the memo
 above relies on.
