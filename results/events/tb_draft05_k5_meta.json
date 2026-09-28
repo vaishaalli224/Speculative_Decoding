@@ -1,0 +1,13 @@
+{
+  "proposer": "draft",
+  "draft_model": "drafts/coder-0.5b-padded",
+  "target_model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+  "k": 5,
+  "max_new_tokens": 512,
+  "limit": 100,
+  "dtype": "bfloat16",
+  "device": "cuda:0",
+  "n_records": 100,
+  "n_events": 10785,
+  "git_commit": "429fda4db6458684412e09fdc34d609a21de83d9"
+}

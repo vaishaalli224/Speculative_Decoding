@@ -1,0 +1,13 @@
+{
+  "proposer": "draft",
+  "draft_model": "checkpoints/tb_stage1/final",
+  "target_model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+  "k": 5,
+  "max_new_tokens": 512,
+  "limit": 100,
+  "dtype": "bfloat16",
+  "device": "cuda:0",
+  "n_records": 100,
+  "n_events": 1733,
+  "git_commit": "4cbee718fbe71d06175423a5222d4ca8ae74ab42"
+}

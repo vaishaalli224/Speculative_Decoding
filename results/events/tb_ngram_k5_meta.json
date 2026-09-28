@@ -1,0 +1,13 @@
+{
+  "proposer": "ngram",
+  "draft_model": null,
+  "target_model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+  "k": 5,
+  "max_new_tokens": 512,
+  "limit": 100,
+  "dtype": "bfloat16",
+  "device": "cuda:0",
+  "n_records": 100,
+  "n_events": 24609,
+  "git_commit": "9f62a10bf10b3424b5e24ab3e46fe80b33122efb"
+}

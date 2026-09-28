@@ -1,0 +1,22 @@
+{
+  "n_prompts": 50,
+  "n_exact": 50,
+  "n_mismatch": 0,
+  "all_exact": true,
+  "mismatches": [],
+  "ar": {
+    "wall_s": 61.406793053261936
+  },
+  "spec_method": "ngram",
+  "spec_config": {
+    "method": "ngram",
+    "num_speculative_tokens": 5,
+    "prompt_lookup_min": 2,
+    "prompt_lookup_max": 5
+  },
+  "model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+  "dataset": "frozen/xlam_eval.parquet",
+  "limit": 50,
+  "max_new_tokens": 512,
+  "git_commit": "23728a45a49d512d7479d5d4c19ea2ead06d8380"
+}

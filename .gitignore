@@ -24,3 +24,5 @@ drafts/
 # Run artifacts (host-side): auto-logs + training checkpoints
 logs/
 checkpoints/
+results/tb_ablation/
+results/stage1/stage1_target_gen.jsonl

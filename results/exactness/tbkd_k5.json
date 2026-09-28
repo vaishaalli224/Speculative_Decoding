@@ -1,0 +1,22 @@
+{
+  "n_prompts": 50,
+  "n_exact": 50,
+  "n_mismatch": 0,
+  "all_exact": true,
+  "mismatches": [],
+  "ar": {
+    "wall_s": 61.27433317294344
+  },
+  "spec_method": "draft_model",
+  "spec_config": {
+    "method": "draft_model",
+    "model": "checkpoints/tb_stage1/final",
+    "num_speculative_tokens": 5,
+    "max_model_len": 16384
+  },
+  "model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+  "dataset": "frozen/xlam_eval.parquet",
+  "limit": 50,
+  "max_new_tokens": 512,
+  "git_commit": "eb74d2326089e434aca98c888821fd71dbaffbd8"
+}

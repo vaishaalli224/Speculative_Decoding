@@ -1,0 +1,47 @@
+{
+  "n_prompts": 50,
+  "n_exact": 46,
+  "n_mismatch": 4,
+  "all_exact": false,
+  "mismatches": [
+    {
+      "query_id": 533,
+      "first_divergence": 119,
+      "len_baseline": 199,
+      "len_spec": 179
+    },
+    {
+      "query_id": 1219,
+      "first_divergence": 147,
+      "len_baseline": 153,
+      "len_spec": 271
+    },
+    {
+      "query_id": 4074,
+      "first_divergence": 5,
+      "len_baseline": 70,
+      "len_spec": 71
+    },
+    {
+      "query_id": 5024,
+      "first_divergence": 87,
+      "len_baseline": 180,
+      "len_spec": 180
+    }
+  ],
+  "ar": {
+    "wall_s": 61.10402724193409
+  },
+  "spec_method": "draft_model",
+  "spec_config": {
+    "method": "draft_model",
+    "model": "checkpoints/stage1/final",
+    "num_speculative_tokens": 5,
+    "max_model_len": 16384
+  },
+  "model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+  "dataset": "frozen/xlam_eval.parquet",
+  "limit": 50,
+  "max_new_tokens": 512,
+  "git_commit": "c55933af5aa41d5e11a3844ace44f2094ec4fd67"
+}
