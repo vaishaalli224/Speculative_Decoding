@@ -28,7 +28,10 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 PY="${PY:-.venv-h100/bin/python}"
 TARGET="${TARGET:-Qwen/Qwen2.5-Coder-14B-Instruct}"
-DRAFT="${DRAFT:-checkpoints/stage1/final}"
+DRAFT="${DRAFT:-checkpoints/tb_stage1/final}"  # §2 warm-start amendment:
+# ablation A's TB-KD dominates Stage-1 in both columns (xLAM 4.07 vs 4.01;
+# TB 3.04 vs 2.65, non-overlapping CI) — the sharper Stage-2 question is
+# "does on-policy add anything over the best off-policy result?"
 XLAMCTX="${XLAMCTX:-data/processed/xlam/stage2_contexts}"
 TBCTX="${TBCTX:-data/processed/toolbench/prefixes}"
 S1DATA="${S1DATA:-data/processed/stage1_kd}"

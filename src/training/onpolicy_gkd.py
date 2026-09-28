@@ -80,11 +80,12 @@ tiny-model end-to-end in tests/test_onpolicy_gkd_realmodels.py):
      bf16 (no_grad, inference-only) for speed.
 
 CLI:
-  python -m src.training.onpolicy_gkd --draft checkpoints/stage1/final \
+  python -m src.training.onpolicy_gkd \
       --target Qwen/Qwen2.5-Coder-14B-Instruct \
       --xlam-ctx data/processed/xlam/stage2_contexts \
       --tb-ctx data/processed/toolbench/prefixes \
       --out checkpoints/stage2 --steps 400 --device cuda:0
+  (--draft defaults to the TB-KD warm start, plan §2 amendment)
 """
 
 from __future__ import annotations
@@ -100,7 +101,13 @@ from pathlib import Path
 from src.data_prep.render import REGION_CONTEXT, get_tokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DRAFT = REPO_ROOT / "checkpoints" / "stage1" / "final"
+# §2 warm-start amendment (2026-09-27, pre-launch): Stage-2 initializes
+# from the TB-KD checkpoint (ablation A, plan §4.7A) — it dominates the
+# xLAM Stage-1 in BOTH frozen-eval columns (xLAM 4.07 vs 4.01; TB 3.04 vs
+# 2.65, non-overlapping CIs) and enters GKD's 1:1 TB:xLAM sampling mix
+# competent on both distributions from step one, where a Stage-1 draft
+# has never seen a TB state.
+DEFAULT_DRAFT = REPO_ROOT / "checkpoints" / "tb_stage1" / "final"
 DEFAULT_TARGET = "Qwen/Qwen2.5-Coder-14B-Instruct"
 DEFAULT_OUT = REPO_ROOT / "checkpoints" / "stage2"
 DEFAULT_XLAM_CTX = REPO_ROOT / "data" / "processed" / "xlam" / "stage2_contexts"
