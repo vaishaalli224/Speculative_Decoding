@@ -118,11 +118,115 @@ class TestContextStream:
 
 
 class _FakeDS:
-    """Minimal load_from_disk stand-in: iterable of record dicts."""
+    """Minimal load_from_disk stand-in: iterable of record dicts. Rows are
+    either bare id lists (wrapped as {"input_ids": rows}) or full record
+    dicts (passed through untouched)."""
 
     def __init__(self, rows):
         self.rows = rows
 
     def __iter__(self):
         for r in self.rows:
-            yield {"input_ids": r}
+            if isinstance(r, dict):
+                yield r
+            else:
+                yield {"input_ids": r}
+
+
+class TestPrefixBoundaries:
+    """G5's boundary semantics: a CONTEXT is the prompt prefix ending at
+    a sampling boundary — never the full conversation (the draft must not
+    sample a continuation of a finished conversation's gold assistant
+    turns)."""
+
+    @pytest.fixture
+    def patched_loader(self, monkeypatch):
+        pytest.importorskip("datasets")
+        import datasets as hfds
+
+        def _patch(rows_by_dir):
+            def fake_load(d):
+                key = "x" if "xlam" in str(d) else "t"
+                return _FakeDS(rows_by_dir[key])
+
+            monkeypatch.setattr(hfds, "load_from_disk", fake_load, raising=False)
+            return fake_load
+
+        return _patch
+
+    def test_xlam_context_is_prompt_prefix_not_full_record(
+        self, patched_loader
+    ):
+        # a full record (gold assistant turn included) yields ONLY the
+        # prompt part as its context, ending at n_prompt_tokens
+        ids = list(range(100, 120))
+        rec = {"input_ids": ids, "n_prompt_tokens": 8, "labels": [-100] * 8
+               + list(range(108, 120))}
+        patched_loader({"x": [rec], "t": []})
+        ctxs = g.load_contexts("d_xlam", "d_tb", tb_frac=0.0,
+                               max_ctx=4096, seed=0)
+        assert len(ctxs) == 1
+        assert ctxs[0]["input_ids"] == ids[:8]  # NOT the full 20
+
+    def test_tb_yields_one_context_per_assistant_turn(self, patched_loader):
+        # 2 labeled assistant spans -> 2 contexts; the turn-1 context
+        # contains the turn-0 tool-response region (post-observation)
+        ids = list(range(200, 260))
+        labels = [-100] * 40
+        labels[10] = 210; labels[11] = 211          # assistant span 1
+        labels[30] = 230; labels[31] = 231          # assistant span 2
+        rec = {"input_ids": ids, "labels": labels}
+        patched_loader({"x": [], "t": [rec]})
+        ctxs = g.load_contexts("d_xlam", "d_tb", tb_frac=1.0,
+                               max_ctx=4096, seed=0)
+        assert len(ctxs) == 2
+        starts = sorted(len(c["input_ids"]) for c in ctxs)
+        assert starts == [10, 30]
+        # the later context includes the region between the spans
+        long_ctx = max(ctxs, key=lambda c: len(c["input_ids"]))
+        assert 220 in long_ctx["input_ids"]
+
+    def test_bare_record_whole_ids_is_context(self, patched_loader):
+        # a labels-less, n_prompt_tokens-less record IS a prompt
+        ids = list(range(300, 340))
+        patched_loader({"x": [ids], "t": []})
+        ctxs = g.load_contexts("d_xlam", "d_tb", tb_frac=0.0,
+                               max_ctx=4096, seed=0)
+        assert ctxs[0]["input_ids"] == ids
+
+
+class TestMixPlan:
+    """G4's deterministic Stage-1 slot plan."""
+
+    def test_zero_mix_all_onpolicy(self):
+        t = g.OnPolicyGKDTrainer(
+            draft_dir="d", target_id="t", out_dir="o", xlam_ctx_dir="x",
+            tb_ctx_dir="b", mix_sft_frac=0.0,
+        )
+        assert t._mix_plan(5) == [False] * 5
+
+    def test_quarter_mix_every_fourth_slot(self):
+        t = g.OnPolicyGKDTrainer(
+            draft_dir="d", target_id="t", out_dir="o", xlam_ctx_dir="x",
+            tb_ctx_dir="b", mix_sft_frac=0.25,
+        )
+        plan = t._mix_plan(8)
+        assert plan == [False, False, False, True, False, False, False,
+                        True]
+        assert sum(plan) == 2  # realized share 1/K = 1/4
+
+    def test_high_mix_clamped_to_every_second(self):
+        # f=0.4 -> K = max(2, round(2.5)) = 2 via banker's rounding
+        t = g.OnPolicyGKDTrainer(
+            draft_dir="d", target_id="t", out_dir="o", xlam_ctx_dir="x",
+            tb_ctx_dir="b", mix_sft_frac=0.4,
+        )
+        assert t._mix_plan(4) == [False, True, False, True]
+
+    def test_bad_mix_refused(self):
+        t = g.OnPolicyGKDTrainer(
+            draft_dir="d", target_id="t", out_dir="o", xlam_ctx_dir="x",
+            tb_ctx_dir="b", mix_sft_frac=0.5,
+        )
+        with pytest.raises(ValueError):
+            t._mix_plan(4)
