@@ -155,6 +155,23 @@ All runs report: dataset (xLAM-eval / TB-500), config (draft × untuned / Stage 
 - vLLM `ngram` method (no draft model; `num_speculative_tokens` 4, `prompt_lookup_min` 2, `prompt_lookup_max` 5; sweep the speculative-token count 3/5/7 same as drafts).
 - Why it matters here: tool calls copy function names and argument keys verbatim from the schema in the prompt — precisely what prompt-lookup exploits. Reference points from the plan: suffix decoding 1.45× over baseline on code-heavy workloads, plain n-gram 1.10×. The distilled draft's job is to beat this *cheap* baseline; that is the real bar for the paper-grade claim.
 
+### 4.7 Ablations (added 2026-09-27, mid-GPU-day — purposes and decision rules pre-registered before their results land)
+
+The Stage-1 xLAM→TB-500 transfer measurement landed at **zero transfer** (τ 2.63 → 2.65, inside the CI; §8.0's design working as intended), which made two "why" questions answerable only by ablation. Both are cheap (the datagen+training cycle is ~1h), both reuse the golden-tested Stage-1 pipeline unchanged, and both have pre-registered readings:
+
+**A. TB-prefix KD ablation (off-policy vs on-policy) — `scripts/run_tb_kd_ablation.sh` + `src/data_prep/build_tb_distill.py` (T-series).**
+- *Question:* is Stage-2's on-policy machinery (GKD: draft samples, target scores) necessary, or does the Stage-1 recipe — target-greedy datagen + top-20 KD — applied to *TB contexts* close the same transfer gap? For greedy spec decoding there is a real theoretical case for the latter: committed prefixes are always target-greedy states, so target-generated data matches inference states almost exactly; GKD's edge (draft-visited states) is mainly proven for sampled decoding.
+- *Protocol:* identical to Stage-1 except the context source — 5,000 **assistant-turn boundary contexts** from the frozen TB prefix pool (median 1.4k tok; includes the post-observation states that xLAM cannot supply), target greedy + top-20 logprobs via the unchanged `gen_stage1` engine, T3 validation (prose-only generations kept — the target's majority TB class, measured 49/51 wrapper/prose at turn-0 — only real schema violations drop), `kd_warmstart` fp32 unchanged. Train from the **untuned** draft (not from Stage-1's checkpoint) so the ablation isolates the context distribution, not the warm start.
+- *Decision rule:* compare TB-500 τ across {untuned 2.63, Stage-1 2.65, TB-KD ?, GKD ?}. If **TB-KD ≈ GKD** (overlapping CIs): off-policy KD suffices for greedy spec decoding — the on-policy machinery is unnecessary complexity, and the memo's method section leads with that simplification. If **GKD > TB-KD beyond CI overlap**: the transient-state argument is validated with a measured gap. If **TB-KD < Stage-1 on xLAM-eval** (in-domain regression): the TB distribution actively pulls the draft off the xLAM format — reported via the region split; the mix-ratio question (§6.9) gets its answer empirically.
+- *Secondary read:* TB-KD on xLAM-500 τ measures the reverse transfer (TB-trained on xLAM eval) — symmetric with Stage-1's forward-transfer zero, completing the transfer matrix.
+
+**B. Promptability probe (format vs distribution) — the "stricter prompt" hypothesis.**
+- *Question:* how much of Stage-1's xLAM gain (τ 3.32 → 4.01, cold-start α₀ 0.03 → 0.82) is a *format* skill that a prompt could inject, vs. genuine distribution learning in the weights? Motivated by the observation that the entire cold-start fix is one token (`` ``` `` → `<`) and the target's xLAM opener is uniform (73/100 `<`).
+- *Protocol:* rerun the **untuned** draft with a one-shot prefix demonstrating the target's actual opening (the `<tools>` wrapper + a call), everything else identical to the untuned τ run; α₀/τ vs. both the untuned and Stage-1 numbers. No training, no GPU-heavy phase (one instrumented-loop pass, ~15 min).
+- *Decision rule:* if prompt-only recovers most of the gap (say τ ≥ ~0.85·(4.01−3.32)+3.32 ≈ 3.9), the honest memo line is "Stage-1's xLAM gain is largely promptable; the weight-level contribution concentrates in [whatever the prompt doesn't recover — expected: mid-stream tag/name regions]". If it recovers little, Stage-1's gain is genuine distribution learning — and prompting is a dead end for the heterogeneous TB opener case (measured: TB turn-0 first tokens are 6-way heterogeneous — no single prompt convention exists to inject), which is then a *reason* distillation is the right tool, stated with numbers.
+
+**Ablation grid, stage-wise table rows:** every ablation enters the §4 metrics battery identically to the mains — τ/α/region-split on TB-500 AND xLAM-500, k=5, 100 frozen prompts, same CIs — so the memo's table reads across without footnote surgery.
+
 ---
 
 ## 5. GPU-day runbook (1× H100, ~24 h)
@@ -170,7 +187,7 @@ Priority-tagged so the day degrades gracefully: P0 must happen, P1 should, P2 on
 | 5.5–9 | Stage 2 on-policy distillation (xLAM + TB prefix mix), hourly checkpoints with quick τ check. | P0 |
 | 9–12 | Re-benchmark untuned / Stage 1 / Stage 2: batch 1 grid (k × temp), batch sweep, exactness re-check, region-split analysis (4.3), per-position curves, CIs. Full k/temp sweep for untuned configs here too. | P0 |
 | 12–14 | ToolBench transfer eval (4.1/4.2/4.3 on TB-500 multi-turn). | P1 |
-| 14–16 | TVD-loss ablation for Stage 2 (promoted into the slot freed by dropping the second draft candidate). | P2 |
+| 14–16 | Ablations (§4.7, running while Stage-2 code finishes — added 2026-09-27): **A** TB-prefix KD (off-policy comparator, `run_tb_kd_ablation.sh` — 🔄 running: datagen 5k boundary contexts → T3 assembly → kd_warmstart; ~1h); **B** promptability probe (untuned draft + one-shot opener prefix; 15 min, GPU-light); TVD-loss ablation for Stage 2 (pre-existing P2, only if hours remain). | P1 |
 | 16–19 | All plots from results JSON; README results tables; repo cleanup. | P0 |
 | 19–24 | Buffer (model download failures, OOM debugging, reruns). | — |
 
@@ -254,6 +271,8 @@ Written down *before* the GPU day so choices aren't made after seeing results:
 
 ## 10. Open questions
 
-- Stage 2 mixing ratio xLAM : ToolBench prefixes (default 1:1 by conversation, §6.9) — ablate only if time remains.
+- Stage 2 mixing ratio xLAM : ToolBench prefixes (default 1:1 by conversation, §6.9) — **now partly empirical**: ablation A (TB-only KD) plus Stage-2 GKD (mixed) give the two poles of the mix axis; if they land within CI, the ratio is not the lever (§4.7's decision rule).
 - Stage 2 draft sampling temperature (T=1.0 default) — ablate greedy sampling only if time remains.
+- ~~Is on-policy (GKD) necessary for greedy spec decoding, or does target-greedy KD on the same contexts suffice?~~ **Promoted to ablation A (§4.7) — running 2026-09-27.**
+- ~~How much of Stage-1's xLAM gain is a promptable format skill?~~ **Promoted to ablation B (§4.7) — queued.**
 - **Next steps for the memo:** AdaSPEC-style token filtering (train only on tokens the draft can realistically learn), and an EAGLE-3 head as the higher-ceiling follow-up.
